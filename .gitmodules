@@ -1,0 +1,3 @@
+[submodule "rag"]
+	path = rag
+	url = git@github.com:rdovgan/mbp-rag.git
