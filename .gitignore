@@ -34,3 +34,7 @@ __pycache__/
 # Logs
 logs/
 *.log
+
+# Task files
+# tasks.json
+# tasks/ 

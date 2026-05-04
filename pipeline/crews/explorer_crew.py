@@ -1,9 +1,28 @@
+"""
+Explorer Crew — scans Java source code and identifies wiki pages.
+
+For large modules (>200 files), uses domain-based exploration:
+  - Module is split into top-level domains (packages)
+  - Each domain is explored separately
+  - Results are merged into a unified plan
+
+For small modules, explores directly in one pass.
+"""
+
 import json
 import os
 import subprocess
 from crewai import Agent, Task, Crew, Process, LLM
 from crewai_tools import FileReadTool, DirectoryReadTool
 import yaml
+import logging
+
+log = logging.getLogger(__name__)
+
+# Limits to stay within LLM context
+MAX_FILES_PER_CHUNK = 30       # files to list in one LLM call
+MAX_PACKAGES_PER_CHUNK = 15    # packages to analyze per chunk
+MAX_FILES_PER_DOMAIN = 80      # max files listed per domain in plan
 
 
 def load_config():
@@ -35,94 +54,112 @@ def build_llm(temperature=0.1):
         }],
     )
 
-def get_directory_tree(source_path: str) -> str:
-    """Отримує дерево директорій без вмісту файлів — дешева операція."""
-    result = subprocess.run(
-        ['find', source_path, '-type', 'f',
-         '(', '-name', '*.java', '-o', '-name', '*.xml',
-         '-o', '-name', '*.yml', '-o', '-name', '*.yaml',
-         '-o', '-name', '*.properties', ')',
-         '-not', '-path', '*/.git/*'],
-        capture_output=True, text=True
-    )
-    files = result.stdout.strip().split('\n')
-    files = [f for f in files if f]
-    return '\n'.join(files)
 
+# ── File system helpers ────────────────────────────────────────────
 
-def get_packages(source_path: str) -> list:
-    """Повертає список унікальних Java пакетів."""
+def count_java_files(path: str) -> int:
     result = subprocess.run(
-        ['find', source_path, '-type', 'd',
+        ['find', path, '-name', '*.java',
          '-not', '-path', '*/.git/*',
          '-not', '-path', '*/target/*'],
         capture_output=True, text=True
     )
-    dirs = result.stdout.strip().split('\n')
-    # Залишаємо тільки java пакети
-    packages = [d for d in dirs if '/java/' in d and d.strip()]
-    return packages
+    return len([f for f in result.stdout.strip().split('\n') if f])
 
 
-def chunk_packages(packages: list, max_chunk_size: int = 20) -> list:
-    """Ділить пакети на chunks для обробки."""
-    chunks = []
-    for i in range(0, len(packages), max_chunk_size):
-        chunks.append(packages[i:i + max_chunk_size])
-    return chunks
+def get_all_java_files(path: str) -> list[str]:
+    result = subprocess.run(
+        ['find', path, '-name', '*.java',
+         '-not', '-path', '*/.git/*',
+         '-not', '-path', '*/target/*'],
+        capture_output=True, text=True
+    )
+    return [f for f in result.stdout.strip().split('\n') if f]
 
 
-def get_files_for_packages(packages: list) -> list:
-    """Повертає всі Java файли для списку пакетів."""
-    files = []
-    for pkg in packages:
-        result = subprocess.run(
-            ['find', pkg, '-maxdepth', '1', '-name', '*.java'],
+def get_file_tree_summary(source_path: str) -> str:
+    """
+    Build a compact tree: show directories and file counts, not individual files.
+    Much smaller than listing all files.
+    """
+    result = subprocess.run(
+        ['find', source_path, '-type', 'd',
+         '-not', '-path', '*/.git/*',
+         '-not', '-path ' '*/target/*'],
+        capture_output=True, text=True
+    )
+    dirs = [d for d in result.stdout.strip().split('\n') if d]
+
+    lines = []
+    for d in sorted(dirs):
+        # Count java files in this directory (not recursive)
+        count_result = subprocess.run(
+            ['find', d, '-maxdepth', '1', '-name', '*.java'],
             capture_output=True, text=True
         )
-        pkg_files = [f for f in result.stdout.strip().split('\n') if f]
-        files.extend(pkg_files)
-    return files
+        count = len([f for f in count_result.stdout.strip().split('\n') if f])
+        if count > 0:
+            # Show relative path from source
+            rel = os.path.relpath(d, source_path)
+            lines.append(f"  {rel}/ ({count} files)")
+
+    return '\n'.join(lines)
 
 
-def analyze_chunk(agent, tasks_cfg, source_path: str,
-                  module_name: str, chunk_packages: list,
-                  chunk_index: int) -> dict:
-    """Аналізує один chunk пакетів."""
-    files = get_files_for_packages(chunk_packages)
-    packages_str = '\n'.join(chunk_packages)
-    files_str = '\n'.join(files[:100])  # максимум 100 файлів на chunk
+# ── LLM-based analysis ────────────────────────────────────────────
+
+def _analyze_package_group(agent, module_name: str, package_path: str,
+                           java_files: list[str]) -> dict:
+    """
+    Ask LLM to analyze a group of files from one package/domain.
+    Returns structured JSON with domain info.
+    """
+    # Limit files to show
+    files_to_show = java_files[:MAX_FILES_PER_CHUNK]
+    files_str = '\n'.join(files_to_show)
+
+    # Read a few key files for context (first 3, first 500 chars each)
+    file_contents = ""
+    for f in files_to_show[:3]:
+        try:
+            with open(f) as fh:
+                content = fh.read(500)
+            rel = os.path.relpath(f, package_path)
+            file_contents += f"\n--- {rel} ---\n{content}\n"
+        except Exception:
+            pass
 
     task = Task(
-        description=f"""Analyze this subset of packages from module '{module_name}' (chunk {chunk_index}).
+        description=f"""Analyze this Java package from module '{module_name}'.
 
-Packages to analyze:
-{packages_str}
-
-Files in these packages:
+Package path: {package_path}
+Files ({len(java_files)} total, showing {len(files_to_show)}):
 {files_str}
 
-For each package identify:
-1. What logical domain/component it belongs to
-2. What business purpose it serves
-3. Key classes and their roles
+Sample code:
+{file_contents}
+
+Identify:
+1. What business domain this package covers
+2. Key classes and their roles
+3. What documentation pages would help a developer understand this code
 
 Return JSON:
 {{
-  "chunk_index": {chunk_index},
-  "domains": [
+  "domain_name": "<kebab-case-name>",
+  "description": "<1-2 sentences what this package does>",
+  "key_classes": ["<ClassName>: <1-line role>"],
+  "suggested_pages": [
     {{
-      "name": "<domain_name>",
-      "description": "<what this domain covers>",
-      "packages": ["<package_path>"],
-      "files": ["<file_path>"],
-      "estimated_complexity": "low|medium|high"
+      "name": "<page-name>",
+      "description": "<what this page should cover>",
+      "wiki_filename": "<name>.md"
     }}
   ]
 }}
 
 Only return valid JSON, no other text.""",
-        expected_output="Valid JSON with domains array",
+        expected_output="Valid JSON with domain analysis",
         agent=agent,
     )
 
@@ -133,140 +170,243 @@ Only return valid JSON, no other text.""",
         verbose=False,
     )
 
-    result = crew.kickoff()
-    raw = str(result.raw) if hasattr(result, 'raw') else str(result)
-
-    if '```json' in raw:
-        raw = raw.split('```json')[1].split('```')[0].strip()
-    elif '```' in raw:
-        raw = raw.split('```')[1].split('```')[0].strip()
-
     try:
+        result = crew.kickoff()
+        raw = str(result.raw) if hasattr(result, 'raw') else str(result)
+
+        if '```json' in raw:
+            raw = raw.split('```json')[1].split('```')[0].strip()
+        elif '```' in raw:
+            raw = raw.split('```')[1].split('```')[0].strip()
+
         return json.loads(raw)
-    except json.JSONDecodeError:
-        return {"chunk_index": chunk_index, "domains": []}
+    except Exception as e:
+        log.warning(f"LLM analysis failed for {package_path}: {e}")
+        return {
+            "domain_name": os.path.basename(package_path).lower().replace('_', '-'),
+            "description": f"Package {package_path}",
+            "key_classes": [],
+            "suggested_pages": [],
+        }
 
 
-def merge_domains(all_chunk_results: list) -> list:
-    """Об'єднує домени з усіх chunks, уникаючи дублікатів."""
-    domain_map = {}
-
-    for chunk_result in all_chunk_results:
-        for domain in chunk_result.get('domains', []):
-            name = domain['name']
-            if name in domain_map:
-                # Об'єднуємо файли і пакети
-                domain_map[name]['files'].extend(domain.get('files', []))
-                domain_map[name]['packages'].extend(domain.get('packages', []))
-                # Беремо вищу складність
-                complexity_order = {'low': 1, 'medium': 2, 'high': 3}
-                current = complexity_order.get(domain_map[name]['estimated_complexity'], 1)
-                new = complexity_order.get(domain.get('estimated_complexity', 'low'), 1)
-                if new > current:
-                    domain_map[name]['estimated_complexity'] = domain.get('estimated_complexity')
-            else:
-                domain_map[name] = {
-                    'name': name,
-                    'description': domain.get('description', ''),
-                    'packages': domain.get('packages', []),
-                    'files': domain.get('files', []),
-                    'estimated_complexity': domain.get('estimated_complexity', 'medium'),
-                    'wiki_filename': f"{name.lower().replace(' ', '-')}.md"
-                }
-
-    # Дедублікуємо файли
-    for domain in domain_map.values():
-        domain['files'] = list(set(domain['files']))
-        domain['packages'] = list(set(domain['packages']))
-
-    return list(domain_map.values())
-
-
-def run_explorer(source_path: str, module_name: str) -> dict:
+def _explore_small_module(source_path: str, module_name: str, agent) -> dict:
     """
-    Chunked exploration — працює для модулів будь-якого розміру.
-    Ділить пакети на chunks по 20, аналізує кожен окремо,
-    потім об'єднує результати.
+    Explore a small module (<200 files) in one or two LLM calls.
     """
-    agents_cfg, tasks_cfg = load_config()
+    files = get_all_java_files(source_path)
+
+    # Split into chunks if needed
+    chunks = []
+    for i in range(0, len(files), MAX_FILES_PER_CHUNK):
+        chunks.append(files[i:i + MAX_FILES_PER_CHUNK])
+
+    all_domains = []
+
+    for i, chunk in enumerate(chunks):
+        log.info(f"[Explorer] Analyzing chunk {i+1}/{len(chunks)} ({len(chunk)} files)")
+        result = _analyze_package_group(agent, module_name, source_path, chunk)
+        if result:
+            all_domains.append(result)
+
+    # Merge domains
+    merged = _merge_domains(all_domains)
+
+    return _build_plan(module_name, source_path, merged, files)
+
+
+def _explore_domain(source_path: str, module_name: str, domain_name: str,
+                    agent) -> dict:
+    """
+    Explore a single domain (sub-package) of a large module.
+    Returns the domain's pages and file list.
+    """
+    files = get_all_java_files(source_path)
+
+    # For very large domains, only list representative files
+    representative_files = files[:MAX_FILES_PER_DOMAIN]
+
+    log.info(f"[Explorer] Exploring domain {domain_name} ({len(files)} files, "
+             f"showing {len(representative_files)})")
+
+    result = _analyze_package_group(agent, module_name, source_path,
+                                    representative_files)
+
+    return {
+        "domain_name": result.get("domain_name", domain_name),
+        "description": result.get("description", ""),
+        "key_classes": result.get("key_classes", []),
+        "files": files,
+        "representative_files": representative_files,
+        "suggested_pages": result.get("suggested_pages", []),
+    }
+
+
+def _merge_domains(domain_results: list) -> list:
+    """Merge domain analysis results, deduplicating."""
+    merged = []
+    seen_names = set()
+
+    for d in domain_results:
+        name = d.get("domain_name", "unknown")
+        if name in seen_names:
+            continue
+        seen_names.add(name)
+        merged.append(d)
+
+    return merged
+
+
+def _build_plan(module_name: str, source_path: str, domains: list,
+                all_files: list) -> dict:
+    """Build the exploration plan JSON."""
+    # Read pom.xml for module description
+    pom_path = os.path.join(source_path, 'pom.xml')
+    module_description = f"Java module {module_name}"
+    if os.path.exists(pom_path):
+        try:
+            with open(pom_path) as f:
+                pom = f.read(3000)
+            if '<description>' in pom:
+                start = pom.find('<description>') + 13
+                end = pom.find('</description>')
+                if end > start:
+                    module_description = pom[start:end].strip()
+        except Exception:
+            pass
+
+    # Build domain pages
+    domain_pages = []
+    for d in domains:
+        name = d.get("domain_name", "unknown")
+        files = d.get("files", [])
+        if not files:
+            # Use representative files if available
+            files = d.get("representative_files", [])
+
+        # Use suggested pages or create one page per domain
+        suggested = d.get("suggested_pages", [])
+        if suggested:
+            for sp in suggested:
+                domain_pages.append({
+                    "name": sp.get("name", name),
+                    "description": sp.get("description", d.get("description", "")),
+                    "wiki_filename": sp.get("wiki_filename", f"{name}.md"),
+                    "files": files,
+                })
+        else:
+            domain_pages.append({
+                "name": name,
+                "description": d.get("description", ""),
+                "wiki_filename": f"{name}.md",
+                "files": files,
+            })
+
+    plan = {
+        "module_name": module_name,
+        "description": module_description,
+        "total_files": len(all_files),
+        "domains": domain_pages,
+        "additional_pages": [
+            {
+                "name": "overview",
+                "description": "Module overview, purpose, architecture, dependencies",
+                "wiki_filename": "overview.md",
+                "files": [pom_path] if os.path.exists(pom_path) else []
+            },
+        ]
+    }
+
+    # Save plan
+    plan_path = f"/home/r.dovgan/cakb/rag/{module_name}/exploration_plan.json"
+    os.makedirs(os.path.dirname(plan_path), exist_ok=True)
+    with open(plan_path, 'w') as f:
+        json.dump(plan, f, indent=2, ensure_ascii=False)
+    log.info(f"[Explorer] Plan saved to {plan_path}")
+
+    return plan
+
+
+# ── Public API ─────────────────────────────────────────────────────
+
+def run_explorer(source_path: str, module_name: str,
+                 domain_hint: str = None) -> dict:
+    """
+    Main entry point for exploration.
+
+    For small modules: explores all files in 1-2 LLM calls.
+    For large modules with domain_hint: explores that specific domain.
+    For large modules without hint: uses decomposer to split into domains.
+
+    Args:
+        source_path: Path to the module source code
+        module_name: Name of the module
+        domain_hint: If set, only explore this sub-domain
+    """
+    from ..decomposer import decompose_module
+
+    agents_cfg, _ = load_config()
     llm = build_llm()
 
-    print(f"\n[Explorer] Scanning directory structure of {module_name}...")
-    all_packages = get_packages(source_path)
-    total_files = get_directory_tree(source_path).count('\n') + 1
-
-    print(f"[Explorer] Found {len(all_packages)} packages, ~{total_files} files")
-
-    # Читаємо pom.xml окремо
-    pom_path = os.path.join(source_path, 'pom.xml')
-    pom_content = ""
-    if os.path.exists(pom_path):
-        with open(pom_path) as f:
-            pom_content = f.read()[:3000]  # перші 3000 символів
-
-    explorer_agent = Agent(
+    agent = Agent(
         role=agents_cfg['explorer']['role'],
         goal=agents_cfg['explorer']['goal'],
         backstory=agents_cfg['explorer']['backstory'],
         llm=llm,
         tools=[FileReadTool(), DirectoryReadTool()],
-        verbose=True,
+        verbose=False,
         max_iter=10,
     )
 
-    # Ділимо пакети на chunks
-    chunks = chunk_packages(all_packages, max_chunk_size=20)
-    print(f"[Explorer] Processing {len(chunks)} chunks...")
+    file_count = count_java_files(source_path)
+    log.info(f"[Explorer] Module {module_name}: {file_count} files"
+             f"{f', domain: {domain_hint}' if domain_hint else ''}")
 
-    all_chunk_results = []
-    for i, chunk in enumerate(chunks):
-        print(f"[Explorer] Analyzing chunk {i+1}/{len(chunks)}...")
-        result = analyze_chunk(
-            explorer_agent, tasks_cfg,
-            source_path, module_name, chunk, i
-        )
-        all_chunk_results.append(result)
+    # Domain hint — explore just one domain
+    if domain_hint:
+        return _explore_domain(source_path, module_name, domain_hint, agent)
 
-    # Об'єднуємо всі домени
-    merged_domains = merge_domains(all_chunk_results)
-    print(f"[Explorer] Identified {len(merged_domains)} domains after merging")
+    # Small module — explore directly
+    if file_count <= 200:
+        return _explore_small_module(source_path, module_name, agent)
 
-    # Визначаємо модуль опис через pom.xml
-    module_description = f"Java module {module_name}"
-    if pom_content:
-        if '<description>' in pom_content:
-            start = pom_content.find('<description>') + 13
-            end = pom_content.find('</description>')
-            if end > start:
-                module_description = pom_content[start:end].strip()
+    # Large module — decompose first, then explore each domain
+    decomposition = decompose_module(module_name, source_path)
+    strategy = decomposition["strategy"]
+    domains = decomposition["domains"]
 
-    plan = {
-        "module_name": module_name,
-        "description": module_description,
-        "total_files": total_files,
-        "total_packages": len(all_packages),
-        "domains": merged_domains,
-        "additional_pages": [
-            {
-                "name": "overview",
-                "description": "Module overview, purpose, architecture, dependencies, quick start",
-                "wiki_filename": "overview.md",
-                "files": [pom_path] if os.path.exists(pom_path) else []
-            },
-            {
-                "name": "configuration",
-                "description": "All configuration files, Spring beans, properties, env variables",
-                "wiki_filename": "configuration.md",
-                "files": []
-            }
-        ]
-    }
+    log.info(f"[Explorer] Strategy: {strategy}, {len(domains)} domains")
 
-    # Зберігаємо план
-    plan_path = f"/home/r.dovgan/cakb/rag/{module_name}/exploration_plan.json"
-    os.makedirs(os.path.dirname(plan_path), exist_ok=True)
-    with open(plan_path, 'w') as f:
-        json.dump(plan, f, indent=2)
-    print(f"[Explorer] Plan saved to {plan_path}")
+    all_domain_pages = []
+    all_files = get_all_java_files(source_path)
 
-    return plan
+    for d in domains:
+        domain_name = d["name"]
+        domain_path = d["source_path"]
+        domain_files = d["file_count"]
+
+        log.info(f"[Explorer] Domain {domain_name}: {domain_files} files")
+
+        if domain_files <= MAX_FILES_PER_DOMAIN:
+            # Small enough to analyze in one call
+            result = _explore_domain(domain_path, module_name, domain_name, agent)
+            if result:
+                all_domain_pages.append(result)
+        else:
+            # Still too large — create page from file tree summary
+            log.info(f"[Explorer] Domain {domain_name} too large for LLM, "
+                     f"generating page from structure")
+            tree = get_file_tree_summary(domain_path)
+            all_domain_pages.append({
+                "domain_name": domain_name,
+                "description": d.get("description", f"Domain {domain_name}"),
+                "key_classes": [],
+                "files": get_all_java_files(domain_path)[:MAX_FILES_PER_DOMAIN],
+                "representative_files": get_all_java_files(domain_path)[:MAX_FILES_PER_DOMAIN],
+                "suggested_pages": [],
+                "_tree_summary": tree,
+            })
+
+    # Merge into plan
+    merged = _merge_domains(all_domain_pages)
+    return _build_plan(module_name, source_path, merged, all_files)

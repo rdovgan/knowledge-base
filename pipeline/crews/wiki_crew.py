@@ -1,8 +1,24 @@
+"""
+Wiki Crew — generates and reviews wiki pages using CrewAI agents.
+
+Handles large modules by:
+  - Sending file tree summary instead of full file list
+  - Limiting files read per generation
+  - Agent uses FileReadTool to read specific files as needed
+"""
+
 import json
 import os
 from crewai import Agent, Task, Crew, Process, LLM
 from crewai_tools import FileReadTool, DirectoryReadTool, FileWriterTool
 import yaml
+import logging
+
+log = logging.getLogger(__name__)
+
+# Limits
+MAX_FILES_IN_PROMPT = 50     # max file paths to list in prompt
+MAX_FILE_CONTENT_KB = 20     # max KB of file content to embed
 
 
 def load_config():
@@ -33,6 +49,27 @@ def build_llm(temperature=0.1):
             "custom_llm_provider": "openai",
         }],
     )
+
+
+def _build_file_context(file_list: list, source_path: str = None) -> str:
+    """
+    Build file context for the LLM prompt.
+    For large file lists, shows a tree summary + representative files.
+    """
+    if len(file_list) <= MAX_FILES_IN_PROMPT:
+        return '\n'.join(file_list)
+
+    # Too many files — show summary + first batch
+    shown = file_list[:MAX_FILES_IN_PROMPT]
+    rest_count = len(file_list) - MAX_FILES_IN_PROMPT
+
+    context = f"Showing {MAX_FILES_IN_PROMPT} of {len(file_list)} files " \
+              f"({rest_count} more available via FileReadTool):\n\n"
+    context += '\n'.join(shown)
+    context += f"\n\n... and {rest_count} more files. Use FileReadTool to read specific files."
+
+    return context
+
 
 def run_wiki_generation(
     module_name: str,
@@ -69,19 +106,18 @@ def run_wiki_generation(
         max_execution_time=120,
     )
 
-    file_list_str = "\n".join(file_list[:50])  # обмеження на розмір
+    file_context = _build_file_context(file_list)
     wiki_file_path = os.path.join(output_path, wiki_filename)
 
     for attempt in range(1, max_attempts + 1):
-        print(f"\n{'='*60}")
-        print(f"Attempt {attempt}/{max_attempts}: {domain_name} -> {wiki_filename}")
-        print(f"{'='*60}")
+        log.info(f"Attempt {attempt}/{max_attempts}: "
+                 f"{module_name}/{domain_name} → {wiki_filename}")
 
         generate_task = Task(
             description=tasks_cfg['generate_wiki_page']['description'].format(
                 domain_name=domain_name,
                 module_name=module_name,
-                file_list=file_list_str,
+                file_list=file_context,
                 output_path=output_path,
                 wiki_filename=wiki_filename,
             ),
@@ -92,7 +128,7 @@ def run_wiki_generation(
         review_task = Task(
             description=tasks_cfg['review_wiki_page']['description'].format(
                 wiki_file_path=wiki_file_path,
-                file_list=file_list_str,
+                file_list=file_context,
                 module_name=module_name,
             ),
             expected_output=tasks_cfg['review_wiki_page']['expected_output'],
@@ -104,12 +140,18 @@ def run_wiki_generation(
             agents=[generator_agent, reviewer_agent],
             tasks=[generate_task, review_task],
             process=Process.sequential,
-            verbose=True,
+            verbose=False,
         )
 
-        result = crew.kickoff()
+        try:
+            result = crew.kickoff()
+        except Exception as e:
+            log.error(f"Crew execution failed: {e}")
+            if attempt == max_attempts:
+                return {"decision": "failed", "score": 0, "error": str(e), "attempts": attempt}
+            continue
 
-        # Парсимо результат reviewer
+        # Parse review result
         raw = str(result.raw) if hasattr(result, 'raw') else str(result)
         if '```json' in raw:
             raw = raw.split('```json')[1].split('```')[0].strip()
@@ -119,33 +161,38 @@ def run_wiki_generation(
         try:
             review = json.loads(raw)
         except json.JSONDecodeError:
-            # Якщо не JSON — шукаємо approved/rejected в тексті
             decision = "approved" if "approved" in raw.lower() else "rejected"
-            review = {"decision": decision, "score": 0.8 if decision == "approved" else 0.5, "issues": []}
+            review = {
+                "decision": decision,
+                "score": 0.8 if decision == "approved" else 0.5,
+                "issues": []
+            }
 
         review['attempts'] = attempt
 
-        print(f"\nReview decision: {review.get('decision')} (score: {review.get('score', 0)})")
+        log.info(f"Review: {review.get('decision')} "
+                 f"(score: {review.get('score', 0)})")
 
         if review.get('decision') == 'approved':
-            # Оновлюємо front matter
             _update_frontmatter(wiki_file_path, review)
             return review
 
         if attempt < max_attempts:
-            print(f"Rejected. Issues: {review.get('issues', [])}")
-            print(f"Retrying with feedback...")
-            # Передаємо feedback в наступну ітерацію
-            file_list_str = f"PREVIOUS ATTEMPT FEEDBACK:\n{review.get('suggestions', '')}\n\nFILES:\n" + "\n".join(file_list[:50])
+            log.info(f"Rejected. Issues: {review.get('issues', [])}. Retrying...")
+            # Add feedback for next attempt
+            file_context = (
+                f"PREVIOUS ATTEMPT FEEDBACK:\n{review.get('suggestions', '')}\n\n"
+                f"FILES:\n" + _build_file_context(file_list)
+            )
 
-    # Після 3 спроб — зберігаємо з needs-human-review
+    # All attempts exhausted
     review['decision'] = 'needs-human-review'
     _update_frontmatter(wiki_file_path, review)
     return review
 
 
 def _update_frontmatter(wiki_file_path: str, review: dict):
-    """Оновлює YAML front matter файлу з результатами review."""
+    """Update YAML front matter with review results."""
     if not os.path.exists(wiki_file_path):
         return
     with open(wiki_file_path, 'r') as f:

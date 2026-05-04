@@ -1,0 +1,135 @@
+{
+  "version": 1,
+  "created_at": "2026-05-04T18:44:44.619246",
+  "updated_at": "2026-05-04T18:45:30.717891",
+  "modules": [
+    {
+      "name": "mbp-utils",
+      "description": "Shared utilities and common helpers",
+      "source_path": "/home/r.dovgan/mbp-rag/mbp-utils",
+      "output_path": "/home/r.dovgan/cakb/rag/mbp-utils",
+      "status": "generating",
+      "priority": 1,
+      "pages": [
+        {
+          "name": "overview",
+          "wiki_filename": "overview.md",
+          "status": "generating",
+          "type": "generate",
+          "files": [
+            "/home/r.dovgan/mbp-rag/mbp-utils/pom.xml"
+          ],
+          "is_overview": true,
+          "attempts": 1,
+          "score": null,
+          "error": null,
+          "started_at": "2026-05-04T18:45:30.717885",
+          "completed_at": null
+        },
+        {
+          "name": "mbp-utils",
+          "wiki_filename": "mbp-utils.md",
+          "status": "pending",
+          "type": "generate",
+          "files": [],
+          "is_overview": false,
+          "attempts": 0,
+          "score": null,
+          "error": null,
+          "started_at": null,
+          "completed_at": null
+        }
+      ],
+      "explored_at": "2026-05-04T18:44:44.620468",
+      "completed_at": null
+    },
+    {
+      "name": "redis",
+      "description": "Redis cache layer and session management",
+      "source_path": "/home/r.dovgan/mbp-rag/redis",
+      "output_path": "/home/r.dovgan/cakb/rag/redis",
+      "status": "pending",
+      "priority": 2,
+      "pages": [],
+      "explored_at": null,
+      "completed_at": null
+    },
+    {
+      "name": "parent-dal",
+      "description": "Parent data access layer configuration",
+      "source_path": "/home/r.dovgan/mbp-rag/parent-dal",
+      "output_path": "/home/r.dovgan/cakb/rag/parent-dal",
+      "status": "pending",
+      "priority": 3,
+      "pages": [],
+      "explored_at": null,
+      "completed_at": null
+    },
+    {
+      "name": "dataaccesslayer",
+      "description": "MyBatis mappers, repositories, DB access",
+      "source_path": "/home/r.dovgan/mbp-rag/dataaccesslayer",
+      "output_path": "/home/r.dovgan/cakb/rag/dataaccesslayer",
+      "status": "pending",
+      "priority": 4,
+      "pages": [],
+      "explored_at": null,
+      "completed_at": null
+    },
+    {
+      "name": "core-module",
+      "description": "Core business logic and shared utilities",
+      "source_path": "/home/r.dovgan/mbp-rag/core-module",
+      "output_path": "/home/r.dovgan/cakb/rag/core-module",
+      "status": "pending",
+      "priority": 5,
+      "pages": [],
+      "explored_at": null,
+      "completed_at": null
+    },
+    {
+      "name": "channel-integration",
+      "description": "External channel connectors",
+      "source_path": "/home/r.dovgan/mbp-rag/channel-integration",
+      "output_path": "/home/r.dovgan/cakb/rag/channel-integration",
+      "status": "pending",
+      "priority": 6,
+      "pages": [],
+      "explored_at": null,
+      "completed_at": null
+    },
+    {
+      "name": "channel-batch-jobs",
+      "description": "Batch processing jobs for channels",
+      "source_path": "/home/r.dovgan/mbp-rag/channel-batch-jobs",
+      "output_path": "/home/r.dovgan/cakb/rag/channel-batch-jobs",
+      "status": "pending",
+      "priority": 7,
+      "pages": [],
+      "explored_at": null,
+      "completed_at": null
+    },
+    {
+      "name": "web-messages",
+      "description": "Web messaging layer",
+      "source_path": "/home/r.dovgan/mbp-rag/web-messages",
+      "output_path": "/home/r.dovgan/cakb/rag/web-messages",
+      "status": "pending",
+      "priority": 8,
+      "pages": [],
+      "explored_at": null,
+      "completed_at": null
+    },
+    {
+      "name": "mbp",
+      "description": "Main booking platform API",
+      "source_path": "/home/r.dovgan/mbp-rag/mbp",
+      "output_path": "/home/r.dovgan/cakb/rag/mbp",
+      "status": "pending",
+      "priority": 9,
+      "pages": [],
+      "explored_at": null,
+      "completed_at": null
+    }
+  ]
+}

@@ -1,3 +1,11 @@
+#!/usr/bin/env python3
+"""
+MBP RAG Pipeline runner.
+
+Usage:
+  python3 run_pipeline.py           # Run pipeline (continuous)
+  python3 run_pipeline.py --reset   # Reset state and start fresh
+"""
 import sys
 import os
 from pathlib import Path
@@ -11,7 +19,7 @@ if env_file.exists():
             k, v = line.split('=', 1)
             os.environ.setdefault(k.strip(), v.strip())
 
-# Дозволяємо crewai читати файли поза робочою директорією
+# Allow crewai to read files outside working directory
 os.environ['CREWAI_TOOLS_ALLOW_UNSAFE_PATHS'] = 'true'
 
 sys.path.insert(0, '/home/r.dovgan/cakb')
@@ -19,5 +27,5 @@ os.chdir('/home/r.dovgan/cakb')
 
 from pipeline.orchestrator import run_pipeline
 
-module_arg = sys.argv[1] if len(sys.argv) > 1 else None
-run_pipeline(single_module=module_arg)
+reset = "--reset" in sys.argv
+run_pipeline(reset=reset)
