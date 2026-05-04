@@ -1,0 +1,33 @@
+{
+  "models": {
+    "main": {
+      "provider": "zai-coding",
+      "modelId": "glm-4.6",
+      "maxTokens": 204800,
+      "temperature": 0.2
+    },
+    "research": {
+      "provider": "claude-code",
+      "modelId": "sonnet",
+      "maxTokens": 64000,
+      "temperature": 0.1
+    },
+    "fallback": {
+      "provider": "claude-code",
+      "modelId": "sonnet",
+      "maxTokens": 64000,
+      "temperature": 0.2
+    }
+  },
+  "global": {
+    "logLevel": "info",
+    "debug": false,
+    "defaultNumTasks": 10,
+    "defaultSubtasks": 7,
+    "defaultPriority": "medium",
+    "projectName": "mbp-rag",
+    "responseLanguage": "English",
+    "enableCodebaseAnalysis": true,
+    "anonymousTelemetry": false
+  }
+}

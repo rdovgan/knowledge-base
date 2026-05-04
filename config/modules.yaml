@@ -1,0 +1,59 @@
+modules:
+  - name: mbp-utils
+    path: sources/mbp-utils
+    priority: 1
+    description: "Shared utilities and common helpers"
+    enabled: true
+
+  - name: redis
+    path: sources/redis
+    priority: 2
+    description: "Redis cache layer and session management"
+    enabled: true
+
+  - name: parent-dal
+    path: sources/parent-dal
+    priority: 3
+    description: "Parent data access layer configuration"
+    enabled: true
+
+  - name: dataaccesslayer
+    path: sources/dataaccesslayer
+    priority: 4
+    description: "MyBatis mappers, repositories, DB access"
+    enabled: true
+
+  - name: core-module
+    path: sources/core-module
+    priority: 5
+    description: "Core business logic and shared utilities"
+    enabled: true
+
+  - name: channel-integration
+    path: sources/channel-integration
+    priority: 6
+    description: "External channel connectors"
+    enabled: true
+
+  - name: channel-batch-jobs
+    path: sources/channel-batch-jobs
+    priority: 7
+    description: "Batch processing jobs for channels"
+    enabled: true
+
+  - name: web-messages
+    path: sources/web-messages
+    priority: 8
+    description: "Web messaging layer"
+    enabled: true
+
+  - name: mbp
+    path: sources/mbp
+    priority: 9
+    description: "Main booking platform API"
+    enabled: true
+  - name: redis
+    path: sources/redis
+    priority: 10
+    description: "Redis cache layer — regenerate"
+    enabled: true

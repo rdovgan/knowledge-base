@@ -1,0 +1,102 @@
+{
+  "status": "completed",
+  "completed_pages": [
+    "configuration",
+    "business-enums",
+    "common-entities",
+    "utils-services",
+    "security"
+  ],
+  "failed_pages": [
+    "overview",
+    "overview"
+  ],
+  "plan": {
+    "module_name": "utils",
+    "description": "A shared utility library module for the MyBookingPal platform. It serves as a common dependency for all other MBP modules, providing shared entities, enumerations, and utility classes. It is designed to be dependency-free to avoid circular dependencies.",
+    "domains": [
+      {
+        "name": "business-enums",
+        "description": "Contains all business-related enumerations and constants used across the MyBookingPal platform, including channel definitions (Booking.com, Airbnb, etc.), yield types (promotions, discounts), notification types, property statuses, and entity types.",
+        "packages": [
+          "com.mybookingpal.utils.enums"
+        ],
+        "files": [
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/enums/BookingPalEnums.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/enums/Language.java"
+        ],
+        "estimated_complexity": "high",
+        "wiki_filename": "business-enums.md"
+      },
+      {
+        "name": "common-entities",
+        "description": "Defines common data structures and data transfer objects (DTOs) used throughout the application. Includes simple value objects like IdName, NameId, Parameter, Time, and extended types like BigDecimalExt.",
+        "packages": [
+          "com.mybookingpal.utils.entity"
+        ],
+        "files": [
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/entity/Parameter.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/entity/Time.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/entity/IdVersion.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/entity/IdName.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/entity/NameId.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/entity/NameIdAction.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/entity/NameStateId.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/entity/BigDecimalExt.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/entity/Unit.java"
+        ],
+        "estimated_complexity": "low",
+        "wiki_filename": "common-entities.md"
+      },
+      {
+        "name": "utils-services",
+        "description": "Stateless utility classes providing helper methods for common operations. Includes date manipulation (DateUtils, CalendarUtils, DateFormatUtils), string processing (MbpStringUtils), collection handling (MbpCollectionUtils), and data conversion (Converter).",
+        "packages": [
+          "com.mybookingpal.utils.service"
+        ],
+        "files": [
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/service/DateFormatUtils.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/service/DateUtils.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/service/MbpCollectionUtils.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/service/MbpStringUtils.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/service/Converter.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/service/CommonDateUtils.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/service/NameIdUtils.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/service/CalendarUtils.java"
+        ],
+        "estimated_complexity": "medium",
+        "wiki_filename": "utils-services.md"
+      },
+      {
+        "name": "security",
+        "description": "Provides security-related utilities, specifically for password hashing using BCrypt and masking sensitive credit card information (PII) to protect data in logs or displays.",
+        "packages": [
+          "com.mybookingpal.utils.security",
+          "com.mybookingpal.utils.security.creditcard"
+        ],
+        "files": [
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/security/BCrypt.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/security/creditcard/CvcKeyWord.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/security/creditcard/CreditCardMaskingUtil.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/security/creditcard/CardNumberKeyWord.java",
+          "/home/r.dovgan/mbp-rag/mbp-utils/src/main/java/com/mybookingpal/utils/security/creditcard/ExpiryDateKeyWord.java"
+        ],
+        "estimated_complexity": "medium",
+        "wiki_filename": "security.md"
+      }
+    ],
+    "additional_pages": [
+      {
+        "name": "overview",
+        "description": "Module overview explaining its purpose as a shared library with zero external dependencies, intended to be included in all other MBP modules. Covers the rationale for moving entities and utils to a central place.",
+        "wiki_filename": "overview.md"
+      },
+      {
+        "name": "configuration",
+        "description": "Details about the Maven configuration (pom.xml), build settings (Java 8), and the strict rule prohibiting the import of external dependencies into this module to ensure it remains lightweight and universally compatible.",
+        "wiki_filename": "configuration.md"
+      }
+    ]
+  },
+  "completed_at": "2026-05-04T12:48:46.972091"
+}

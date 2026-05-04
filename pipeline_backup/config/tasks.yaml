@@ -1,0 +1,100 @@
+explore_module:
+  description: >
+    Analyze the Java module source code at {source_path}.
+
+    Do the following:
+    1. Read the directory structure with find commands
+    2. Read pom.xml to understand dependencies and module purpose
+    3. Scan all Java packages and identify logical domains
+    4. For each domain list the exact files that belong to it
+    5. Estimate complexity (low/medium/high) based on file count and patterns
+
+    Return a JSON object with this exact structure:
+    {{
+      "module_name": "<name>",
+      "description": "<what this module does>",
+      "domains": [
+        {{
+          "name": "<domain_name>",
+          "description": "<what this domain covers>",
+          "packages": ["com.example.package1"],
+          "files": ["/full/path/to/File.java"],
+          "estimated_complexity": "low|medium|high",
+          "wiki_filename": "<domain_name>.md"
+        }}
+      ],
+      "additional_pages": [
+        {{
+          "name": "overview",
+          "description": "Module overview, purpose, dependencies, quick start",
+          "wiki_filename": "overview.md"
+        }},
+        {{
+          "name": "configuration",
+          "description": "All configuration files, properties, Spring beans",
+          "wiki_filename": "configuration.md"
+        }}
+      ]
+    }}
+
+    Be thorough. A RAG system will use this documentation to answer
+    ANY question about this module.
+  expected_output: >
+    Valid JSON object describing all domains and additional pages needed
+    to fully document this module.
+
+generate_wiki_page:
+  description: >
+    Generate a comprehensive wiki page for the domain: {domain_name}
+    Module: {module_name}
+    Source files to read: {file_list}
+    Output file: {output_path}/{wiki_filename}
+
+    Instructions:
+    1. Read EVERY file listed in file_list
+    2. Document everything you find — classes, interfaces, methods,
+       configurations, business rules, data flows
+    3. Include real code examples from the actual source
+    4. Use clear Markdown with headers, tables, code blocks
+    5. Minimum 500 words. Large domains should be 1000-3000 words.
+    6. Save the result to {output_path}/{wiki_filename}
+    7. Also add YAML front matter at the top:
+       ---
+       module: {module_name}
+       domain: {domain_name}
+       generated_at: <ISO timestamp>
+       status: draft
+       ---
+
+    Never invent class names, method names, or behavior.
+    Only document what you can verify in the source files.
+  expected_output: >
+    Confirmation that the wiki file was written to disk with the full path.
+
+review_wiki_page:
+  description: >
+    Review the wiki page at {wiki_file_path} against the source code.
+    Source files: {file_list}
+    Module: {module_name}
+
+    Checklist (check each item):
+    1. All class names mentioned exist in the source files
+    2. All method names mentioned exist in the source files
+    3. No invented behavior or hallucinated functionality
+    4. All public classes and interfaces are documented
+    5. Code examples are syntactically correct and match the source
+    6. Minimum length met (500 words for overview, 300 for others)
+    7. Configuration properties are accurate
+    8. Business logic is correctly described
+
+    Return a JSON object:
+    {{
+      "decision": "approved" | "rejected",
+      "score": 0.0-1.0,
+      "issues": ["specific issue 1", "specific issue 2"],
+      "suggestions": "what to fix if rejected"
+    }}
+
+    Score >= 0.75 = approved. Score < 0.75 = rejected.
+  expected_output: >
+    Valid JSON object with decision, score, issues list, and suggestions.
