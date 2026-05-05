@@ -35,6 +35,10 @@ __pycache__/
 logs/
 *.log
 
+# RAG data
+rag_v2/parsed/
+rag_v2/vectorstore/
+
 # Task files
 # tasks.json
 # tasks/ 
