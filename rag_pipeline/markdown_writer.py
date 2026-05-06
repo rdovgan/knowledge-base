@@ -142,6 +142,16 @@ def write_domain_page(domain: dict, classes: List[dict], output_dir: str) -> str
     channel = domain.get('channel', '')
     packages = domain.get('packages', [])
 
+    # Skip if already enriched — don't overwrite LLM-generated content
+    safe_name = domain_name.replace('/', '_').replace(' ', '_')
+    full_path = os.path.join(output_dir, module, '_domains', f"{safe_name}.md")
+
+    if os.path.exists(full_path):
+        with open(full_path, 'r', encoding='utf-8') as f:
+            head = f.read(200)
+        if 'status: enriched' in head:
+            return full_path  # Preserve enriched content
+
     lines = []
     lines.append(f"---")
     lines.append(f"domain: {domain_name}")
@@ -234,9 +244,6 @@ def write_domain_page(domain: dict, classes: List[dict], output_dir: str) -> str
     # Write file
     dir_path = os.path.join(output_dir, module, '_domains')
     os.makedirs(dir_path, exist_ok=True)
-
-    safe_name = domain_name.replace('/', '_').replace(' ', '_')
-    full_path = os.path.join(dir_path, f"{safe_name}.md")
 
     with open(full_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines))
