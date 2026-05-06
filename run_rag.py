@@ -77,10 +77,10 @@ SOURCE_ROOT = PROJECT_ROOT / "sources"
 if not SOURCE_ROOT.exists():
     SOURCE_ROOT = Path("/home/r.dovgan/mbp-rag")
 
-OUTPUT_DIR = PROJECT_ROOT / "rag_v2"
+OUTPUT_DIR = PROJECT_ROOT / "rag"
 PARSED_FILE = OUTPUT_DIR / "parsed" / "parsed.json"
 DOMAINS_FILE = OUTPUT_DIR / "domains" / "domains.json"
-WIKI_DIR = PROJECT_ROOT / "rag"
+WIKI_DIR = OUTPUT_DIR
 VECTORSTORE_DIR = OUTPUT_DIR / "vectorstore"
 LOCK_FILE = PROJECT_ROOT / ".rag_pipeline.lock"
 
