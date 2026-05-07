@@ -77,11 +77,11 @@ SOURCE_ROOT = PROJECT_ROOT / "sources"
 if not SOURCE_ROOT.exists():
     SOURCE_ROOT = Path("/home/r.dovgan/mbp-rag")
 
-OUTPUT_DIR = PROJECT_ROOT / "rag"
-PARSED_FILE = OUTPUT_DIR / "parsed" / "parsed.json"
-DOMAINS_FILE = OUTPUT_DIR / "domains" / "domains.json"
-WIKI_DIR = OUTPUT_DIR
-VECTORSTORE_DIR = OUTPUT_DIR / "vectorstore"
+WIKI_DIR = PROJECT_ROOT / "rag"            # wiki markdown (inside submodule, git-managed)
+DATA_DIR = PROJECT_ROOT / "data"          # pipeline data (outside submodule, safe from git ops)
+PARSED_FILE = DATA_DIR / "parsed" / "parsed.json"
+DOMAINS_FILE = DATA_DIR / "domains" / "domains.json"
+VECTORSTORE_DIR = DATA_DIR / "vectorstore"
 LOCK_FILE = PROJECT_ROOT / ".rag_pipeline.lock"
 
 MODULES = {}
@@ -142,8 +142,8 @@ class PipelineLock:
 def step_parse(modules=None, force=False):
     from rag_pipeline.java_parser import parse_module
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    (OUTPUT_DIR / "parsed").mkdir(exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (DATA_DIR / "parsed").mkdir(exist_ok=True)
 
     # Skip if all modules already parsed (unless --force or specific modules requested)
     if not force and not modules and PARSED_FILE.exists():
@@ -227,7 +227,7 @@ def step_group(force=False):
             log.info(f"⏭  Group: already done ({len(domains)} domains). Use --force to re-group.")
             return
 
-    (OUTPUT_DIR / "domains").mkdir(parents=True, exist_ok=True)
+    (DATA_DIR / "domains").mkdir(parents=True, exist_ok=True)
 
     with open(PARSED_FILE) as f:
         parsed = json.load(f)
@@ -309,6 +309,7 @@ def step_index():
         log.error(f"Wiki dir not found: {WIKI_DIR}. Run markdown step first.")
         sys.exit(1)
 
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     VECTORSTORE_DIR.mkdir(parents=True, exist_ok=True)
 
     for attempt in range(1, INDEX_MAX_RETRIES + 1):

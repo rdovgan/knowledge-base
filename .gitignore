@@ -36,9 +36,8 @@ __pycache__/
 logs/
 *.log
 
-# RAG data
-rag/parsed/
-rag/vectorstore/
+# RAG data (outside submodule, git-safe)
+data/
 
 # Task files
 # tasks.json

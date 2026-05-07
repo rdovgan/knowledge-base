@@ -19,16 +19,44 @@ from typing import Optional
 from fastapi import FastAPI, Query as QueryParam
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
+import logging
 import uvicorn
 import subprocess
 
 app = FastAPI(title="CAKB — RAG Pipeline & Query API")
 
+log = logging.getLogger("cakb.api")
+
+# ── In-memory API request log ───────────────────────────────────
+import threading
+from collections import deque
+from datetime import datetime
+
+_api_log_lock = threading.Lock()
+_api_logs = deque(maxlen=200)  # keep last 200 entries
+
+def _api_log(method: str, path: str, status: int, duration_ms: float, detail: str = ""):
+    with _api_log_lock:
+        _api_logs.append({
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "method": method,
+            "path": path,
+            "status": status,
+            "duration_ms": round(duration_ms, 0),
+            "detail": detail,
+        })
+
+@app.get("/api/logs")
+def api_get_logs():
+    with _api_log_lock:
+        return list(_api_logs)
+
 PROJECT_ROOT = Path("/home/r.dovgan/cakb")
-RAG_DIR = PROJECT_ROOT / "rag"
+RAG_DIR = PROJECT_ROOT / "rag"          # wiki markdown (submodule)
+DATA_DIR = PROJECT_ROOT / "data"        # pipeline data (outside submodule, git-safe)
 LOG_FILE = PROJECT_ROOT / "logs" / "pipeline.log"
 STATE_FILE = PROJECT_ROOT / "pipeline_state.json"
-VECTORSTORE_DIR = RAG_DIR / "vectorstore"
+VECTORSTORE_DIR = DATA_DIR / "vectorstore"
 
 
 def load_env():
@@ -91,6 +119,7 @@ def api_query(req: QueryRequest):
         top_k=req.top_k,
         filter_metadata=req.filter,
     )
+    _api_log("POST", "/api/query", 200, 0, req.query[:80])
     return QueryResponse(
         query=req.query,
         total_results=len(results),
@@ -113,6 +142,7 @@ def api_query_get(q: str = QueryParam(..., alias="q"), top_k: int = 5):
         collection_name="wiki_java",
         top_k=top_k,
     )
+    _api_log("GET", "/api/query", 200, 0, q[:80])
     return QueryResponse(query=q, total_results=len(results), results=results)
 
 
@@ -121,6 +151,27 @@ def api_query_get(q: str = QueryParam(..., alias="q"), top_k: int = 5):
 # Load LLM config from .env
 load_env()
 LLM_API_KEY = os.environ.get("ZAI_API_KEY", "")
+
+# ── Startup integrity check ───────────────────────────────────────
+
+def _check_vectorstore():
+    """Warn if vectorstore is missing or empty."""
+    if not VECTORSTORE_DIR.is_dir():
+        log.warning(f"Vectorstore dir not found: {VECTORSTORE_DIR}. API will return empty results.")
+        return
+    try:
+        import chromadb
+        client = chromadb.PersistentClient(path=str(VECTORSTORE_DIR))
+        for coll in client.list_collections():
+            count = coll.count()
+            if count == 0:
+                log.warning(f"Collection '{coll.name}' is empty. Run: python3 run_rag.py index")
+            else:
+                log.info(f"Vectorstore OK: {coll.name} = {count} chunks")
+    except Exception as e:
+        log.warning(f"Vectorstore check failed: {e}")
+
+_check_vectorstore()
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
 LLM_MODEL = os.environ.get("LLM_MODEL", "glm-5-turbo")
 LLM_FALLBACK = os.environ.get("LLM_FALLBACK_MODEL", "glm-4.7")
@@ -314,7 +365,18 @@ def api_ask(req: AskRequest):
           -H 'Content-Type: application/json' \
           -d '{"query": "how does a booking flow from Booking.com through the system?", "top_k": 10}'
     """
-    return _do_ask(req.query, req.top_k, req.filter, req.model)
+    start = datetime.now()
+    try:
+        result = _do_ask(req.query, req.top_k, req.filter, req.model)
+        duration = (datetime.now() - start).total_seconds() * 1000
+        _api_log("POST", "/api/ask", 200, duration, req.query[:80])
+        return result
+    except Exception as e:
+        duration = (datetime.now() - start).total_seconds() * 1000
+        _api_log("POST", "/api/ask", 500, duration, f"ERROR: {e}")
+        log.exception(f"/api/ask failed: {e}")
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(f"Internal error: {e}", status_code=500)
 
 
 @app.get("/api/ask")
@@ -324,7 +386,11 @@ def api_ask_get(q: str = QueryParam(..., alias="q"), top_k: int = 10):
     Example:
         curl 'http://localhost:8090/api/ask?q=how+does+reservation+clarity+work&top_k=8'
     """
-    return _do_ask(q, top_k, None)
+    start = datetime.now()
+    result = _do_ask(q, top_k, None)
+    duration = (datetime.now() - start).total_seconds() * 1000
+    _api_log("GET", "/api/ask", 200, duration, q[:80])
+    return result
 
 
 def get_state():
@@ -372,17 +438,22 @@ def get_total_pages() -> int:
 @app.get("/api/status-rag")
 def api_status_rag():
     """RAG index stats."""
+    start = datetime.now()
     try:
         import chromadb
         client = chromadb.PersistentClient(path=str(VECTORSTORE_DIR))
         coll = client.get_collection("wiki_java")
-        return {"indexed_chunks": coll.count(), "collection": "wiki_java"}
+        result = {"indexed_chunks": coll.count(), "collection": "wiki_java"}
     except Exception as e:
-        return {"error": str(e)}
+        result = {"error": str(e)}
+    duration = (datetime.now() - start).total_seconds() * 1000
+    _api_log("GET", "/api/status-rag", 200, duration)
+    return result
 
 
 @app.get("/api/status")
 def api_status():
+    start = datetime.now()
     running, pid = is_running()
     state = get_state()
 
@@ -414,7 +485,7 @@ def api_status():
     done_pages = sum(m["completed"] for m in modules_data)
     done_modules = sum(1 for m in modules_data if m["status"] == "done")
 
-    return {
+    result = {
         "running": running,
         "pid": pid,
         "wiki_files": get_total_pages(),
@@ -427,6 +498,9 @@ def api_status():
         "modules": modules_data,
         "logs": get_last_logs(30),
     }
+    duration = (datetime.now() - start).total_seconds() * 1000
+    _api_log("GET", "/api/status", 200, duration)
+    return result
 
 
 @app.get("/api/reset")
@@ -434,6 +508,7 @@ def api_reset():
     """Reset pipeline state."""
     if STATE_FILE.exists():
         STATE_FILE.unlink()
+    _api_log("GET", "/api/reset", 200, 0)
     return {"status": "reset"}
 
 
@@ -444,18 +519,21 @@ def dashboard():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MBP RAG Pipeline</title>
+<title>CAKB — RAG Pipeline & Query API</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; padding: 24px; }
-  h1 { font-size: 22px; font-weight: 600; color: #fff; margin-bottom: 4px; }
+  body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; padding: 24px; max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 600; color: #fff; margin-bottom: 4px; display: inline; }
   .subtitle { color: #888; font-size: 13px; margin-bottom: 24px; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+  .header-row { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+  .btn-help { background: #2563eb; color: #fff; border: none; padding: 5px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; }
+  .btn-help:hover { background: #3b82f6; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr; gap: 16px; margin-bottom: 24px; }
   .card { background: #1a1d27; border-radius: 12px; padding: 20px; border: 1px solid #2a2d3a; }
-  .card-label { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
-  .card-value { font-size: 28px; font-weight: 700; color: #fff; }
+  .card-label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .card-value { font-size: 24px; font-weight: 700; color: #fff; }
   .card-value.green { color: #4ade80; }
-  .card-value.yellow { color: #fbbf24; }
   .card-value.red { color: #f87171; }
   .card-value.blue { color: #60a5fa; }
   .status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
@@ -463,55 +541,81 @@ def dashboard():
   .dot-red { background: #f87171; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
 
-  .modules { background: #1a1d27; border-radius: 12px; border: 1px solid #2a2d3a; margin-bottom: 24px; overflow: hidden; }
-  .modules-header { padding: 16px 20px; border-bottom: 1px solid #2a2d3a; font-weight: 600; font-size: 14px; }
+  .section { background: #1a1d27; border-radius: 12px; border: 1px solid #2a2d3a; margin-bottom: 24px; overflow: hidden; }
+  .section-header { padding: 14px 20px; border-bottom: 1px solid #2a2d3a; font-weight: 600; font-size: 14px; display: flex; justify-content: space-between; align-items: center; }
+  .section-body { padding: 0; }
+
   .module-row { border-bottom: 1px solid #1e2130; }
   .module-row:last-child { border-bottom: none; }
-  .module-header { padding: 12px 20px; transition: background .15s; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+  .module-header { padding: 12px 20px; transition: background .15s; cursor: pointer; display: flex; align-items: center; gap: 12px; }
   .module-header:hover { background: #1e2130; }
-  .module-top { display: flex; justify-content: space-between; align-items: center; }
-  .module-name { font-weight: 500; font-size: 14px; }
-  .module-chevron { margin-left: 8px; transition: transform 0.2s; font-size: 12px; color: #6b7280; }
+  .module-name { font-weight: 500; font-size: 14px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { min-width: 72px; text-align: center; flex-shrink: 0; }
+  .module-chevron { transition: transform 0.2s; font-size: 12px; color: #6b7280; flex-shrink: 0; width: 16px; }
   .module-chevron.expanded { transform: rotate(90deg); }
   .module-content { padding: 0 20px 12px 20px; display: none; }
   .module-content.expanded { display: block; }
   .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
   .badge-done { background: #14532d; color: #4ade80; }
-  .badge-exploring { background: #1e3a5f; color: #60a5fa; }
   .badge-generating { background: #1e3a5f; color: #60a5fa; animation: pulse 2s infinite; }
   .badge-pending { background: #1f2937; color: #9ca3af; }
   .badge-failed { background: #450a0a; color: #f87171; }
-
   .module-stats { display: flex; gap: 16px; font-size: 12px; color: #9ca3af; margin-bottom: 8px; }
-  .module-stats span { font-weight: 600; }
   .module-stats .done { color: #4ade80; }
   .module-stats .fail { color: #f87171; }
   .module-stats .pend { color: #fbbf24; }
-
   .progress-bar { height: 6px; background: #2a2d3a; border-radius: 3px; overflow: hidden; }
   .progress-fill { height: 100%; border-radius: 3px; transition: width .5s; }
-
   .pages-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px; margin-top: 8px; }
   .page-chip { font-size: 11px; padding: 4px 8px; border-radius: 6px; background: #2a2d3a; }
-  .page-chip.done { background: #14532d; color: #4ade80; }
   .page-chip.failed { background: #450a0a; color: #f87171; }
-  .page-chip.pending { background: #1f2937; color: #9ca3af; }
   .page-chip.generating { background: #1e3a5f; color: #60a5fa; animation: pulse 1s infinite; }
 
-  .logs { background: #1a1d27; border-radius: 12px; border: 1px solid #2a2d3a; overflow: hidden; }
-  .logs-header { padding: 16px 20px; border-bottom: 1px solid #2a2d3a; font-weight: 600; font-size: 14px; display: flex; justify-content: space-between; align-items: center; }
-  .logs-body { padding: 16px 20px; font-family: monospace; font-size: 12px; max-height: 320px; overflow-y: auto; }
-  .log-line { padding: 2px 0; color: #9ca3af; line-height: 1.6; word-break: break-all; }
+  .log-body { padding: 12px 20px; font-family: 'Menlo', 'Consolas', monospace; font-size: 12px; max-height: 300px; overflow-y: auto; }
+  .log-line { padding: 2px 0; color: #9ca3af; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
   .log-line.error { color: #f87171; }
   .log-line.warning { color: #fbbf24; }
   .log-line.success { color: #4ade80; }
 
-  .btn-reset { background: #dc2626; color: #fff; border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; }
-  .btn-reset:hover { background: #ef4444; }
+  /* API log table */
+  .api-log-table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: 'Menlo', 'Consolas', monospace; }
+  .api-log-table th { text-align: left; color: #6b7280; font-weight: 600; padding: 8px 12px; border-bottom: 1px solid #2a2d3a; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .api-log-table td { padding: 6px 12px; border-bottom: 1px solid #1e2130; vertical-align: top; }
+  .api-log-table tr:hover { background: #1e2130; }
+  .status-ok { color: #4ade80; }
+  .status-err { color: #f87171; }
+  .method-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 700; }
+  .method-get { background: #1e3a5f; color: #60a5fa; }
+  .method-post { background: #14532d; color: #4ade80; }
+
+  /* Help modal */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 1000; justify-content: center; align-items: center; }
+  .modal-overlay.active { display: flex; }
+  .modal { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 16px; max-width: 720px; width: 90%; max-height: 85vh; overflow-y: auto; padding: 0; }
+  .modal-title { padding: 20px 24px; border-bottom: 1px solid #2a2d3a; display: flex; justify-content: space-between; align-items: center; }
+  .modal-title h2 { font-size: 18px; color: #fff; }
+  .modal-close { background: none; border: none; color: #6b7280; font-size: 20px; cursor: pointer; padding: 4px 8px; border-radius: 6px; }
+  .modal-close:hover { background: #2a2d3a; color: #fff; }
+  .modal-body { padding: 20px 24px; }
+  .api-section { margin-bottom: 24px; }
+  .api-section h3 { color: #60a5fa; font-size: 14px; margin-bottom: 8px; }
+  .api-section p { color: #9ca3af; font-size: 13px; margin-bottom: 10px; line-height: 1.5; }
+  .code-block { background: #0f1117; border: 1px solid #2a2d3a; border-radius: 8px; padding: 14px 16px; font-family: 'Menlo', 'Consolas', monospace; font-size: 12px; color: #e0e0e0; overflow-x: auto; position: relative; margin-bottom: 8px; white-space: pre; line-height: 1.6; }
+  .btn-copy { position: absolute; top: 8px; right: 8px; background: #2a2d3a; color: #9ca3af; border: none; padding: 3px 8px; border-radius: 4px; font-size: 10px; cursor: pointer; }
+  .btn-copy:hover { background: #3b4252; color: #fff; }
+  .param-table { width: 100%; font-size: 12px; margin-bottom: 12px; }
+  .param-table td { padding: 4px 8px; border-bottom: 1px solid #1e2130; }
+  .param-table td:first-child { color: #fbbf24; font-family: monospace; white-space: nowrap; }
+  .param-table td:last-child { color: #9ca3af; }
+  .response-hint { color: #6b7280; font-size: 11px; font-style: italic; margin-top: 4px; }
 </style>
 </head>
 <body>
-<h1>🚀 MBP RAG Pipeline</h1>
+
+<div class="header-row">
+  <h1>🚀 CAKB — RAG Pipeline</h1>
+  <button class="btn-help" onclick="toggleModal(true)">💡 API Examples</button>
+</div>
 <p class="subtitle" id="updated">Loading...</p>
 
 <div class="grid">
@@ -532,22 +636,118 @@ def dashboard():
     <div class="card-value" id="modules-done">—</div>
   </div>
   <div class="card">
-    <div class="card-label">RAG Index Chunks</div>
+    <div class="card-label">Index Chunks</div>
     <div class="card-value blue" id="rag-chunks">—</div>
   </div>
 </div>
 
-<div class="modules">
-  <div class="modules-header">📦 Modules</div>
-  <div id="modules-list"></div>
+<div class="section">
+  <div class="section-header">📦 Modules</div>
+  <div class="section-body" id="modules-list"></div>
 </div>
 
-<div class="logs">
-  <div class="logs-header">
-    <span>📋 Logs</span>
-    <span class="subtitle" id="log-updated"></span>
+<div class="section">
+  <div class="section-header">
+    <span>🔗 API Requests</span>
+    <span style="font-size:11px;color:#6b7280" id="api-log-count"></span>
   </div>
-  <div class="logs-body" id="logs-body"></div>
+  <div class="section-body" style="max-height:300px;overflow-y:auto" id="api-log-body">
+    <table class="api-log-table">
+      <thead><tr><th>Time</th><th></th><th>Endpoint</th><th>Status</th><th>Duration</th><th>Detail</th></tr></thead>
+      <tbody id="api-log-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-header">
+    <span>📋 Pipeline Logs</span>
+    <span style="font-size:11px;color:#6b7280" id="log-updated"></span>
+  </div>
+  <div class="log-body" id="logs-body"></div>
+</div>
+
+<!-- Help Modal -->
+<div class="modal-overlay" id="help-modal" onclick="if(event.target===this)toggleModal(false)">
+  <div class="modal">
+    <div class="modal-title">
+      <h2>💡 API Examples</h2>
+      <button class="modal-close" onclick="toggleModal(false)">✕</button>
+    </div>
+    <div class="modal-body">
+
+      <div class="api-section">
+        <h3>POST /api/ask — RAG Query (search + LLM answer)</h3>
+        <p>The main endpoint. Sends a natural language question, retrieves relevant code context, and generates a detailed answer with class/method references.</p>
+        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl -X POST http://localhost:8090/api/ask \\
+  -H 'Content-Type: application/json' \\
+  -d '{
+    "query": "How does inquiry reservation work?",
+    "top_k": 10
+  }'</div>
+        <table class="param-table">
+          <tr><td>query</td><td>string — Your question in plain English</td></tr>
+          <tr><td>top_k</td><td>int, default 10 — Number of chunks to retrieve</td></tr>
+          <tr><td>filter</td><td>object, optional — Metadata filter, e.g. {"module": "mbp"}</td></tr>
+          <tr><td>model</td><td>string, optional — Override LLM model name</td></tr>
+        </table>
+        <p class="response-hint">Returns: { query, answer (Markdown), model, total_sources, sources[] }</p>
+      </div>
+
+      <div class="api-section">
+        <h3>GET /api/ask — Quick RAG via URL params</h3>
+        <p>Same as POST but via GET — handy for quick browser tests.</p>
+        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl 'http://localhost:8090/api/ask?q=how+does+booking+work&top_k=8'</div>
+      </div>
+
+      <div class="api-section">
+        <h3>POST /api/query — Semantic Search (chunks only, no LLM)</h3>
+        <p>Returns raw matching chunks with distance scores. Useful when you need source documents without an LLM summary.</p>
+        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl -X POST http://localhost:8090/api/query \\
+  -H 'Content-Type: application/json' \\
+  -d '{
+    "query": "ReservationNightlyRateRequest",
+    "top_k": 5,
+    "filter": {"module": "mbp"}
+  }'</div>
+        <p class="response-hint">Returns: { query, total_results, results[{id, text, metadata, distance}] }</p>
+      </div>
+
+      <div class="api-section">
+        <h3>GET /api/query — Quick search via URL params</h3>
+        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl 'http://localhost:8090/api/query?q=InquiryReservation&top_k=3'</div>
+      </div>
+
+      <div class="api-section">
+        <h3>GET /api/status — Pipeline Status</h3>
+        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl http://localhost:8090/api/status</div>
+      </div>
+
+      <div class="api-section">
+        <h3>GET /api/status-rag — RAG Index Stats</h3>
+        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl http://localhost:8090/api/status-rag</div>
+      </div>
+
+      <div class="api-section">
+        <h3>GET /api/logs — Recent API Request Log</h3>
+        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl http://localhost:8090/api/logs</div>
+      </div>
+
+      <div class="api-section" style="margin-bottom:0">
+        <h3>Python Example</h3>
+        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>import requests
+
+resp = requests.post("http://localhost:8090/api/ask", json={
+    "query": "How does the pricing engine calculate nightly rates?",
+    "top_k": 10
+})
+data = resp.json()
+print(data["answer"])        # Markdown answer
+print(data["total_sources"])  # Number of source chunks used</div>
+      </div>
+
+    </div>
+  </div>
 </div>
 
 <script>
@@ -558,17 +758,48 @@ function toggleModule(header) {
   chevron.classList.toggle('expanded');
 }
 
-function logClass(line) {
+function toggleModal(show) {
+  document.getElementById('help-modal').classList.toggle('active', show);
+}
+
+function copyCode(btn) {
+  const code = btn.parentElement.textContent.replace('Copy','').trim();
+  navigator.clipboard.writeText(code).then(() => {
+    btn.textContent = '✓';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  });
+}
+
+function pipelineLogClass(line) {
   if (line.includes('ERROR') || line.includes('❌')) return 'error';
   if (line.includes('WARNING') || line.includes('⚠')) return 'warning';
-  if (line.includes('✅') || line.includes('approved') || line.includes('complete')) return 'success';
-  return 'info';
+  if (line.includes('✅') || line.includes('complete')) return 'success';
+  return '';
+}
+
+function statusClass(code) {
+  if (code >= 200 && code < 300) return 'status-ok';
+  return 'status-err';
+}
+
+function methodClass(m) {
+  return 'method-' + m.toLowerCase();
+}
+
+function formatDuration(ms) {
+  if (ms < 1000) return ms.toFixed(0) + 'ms';
+  return (ms / 1000).toFixed(1) + 's';
 }
 
 async function refresh() {
   try {
-    const r = await fetch('/api/status');
-    const d = await r.json();
+    // Fetch status and API logs in parallel
+    const [statusResp, apiLogResp] = await Promise.all([
+      fetch('/api/status'),
+      fetch('/api/logs')
+    ]);
+    const d = await statusResp.json();
+    const apiLogs = await apiLogResp.json();
 
     // Header cards
     const running = d.running;
@@ -584,11 +815,7 @@ async function refresh() {
     try {
       const rr = await fetch('/api/status-rag');
       const rd = await rr.json();
-      if (rd.error) {
-        document.getElementById('rag-chunks').textContent = 'Error';
-      } else {
-        document.getElementById('rag-chunks').textContent = rd.indexed_chunks.toLocaleString();
-      }
+      document.getElementById('rag-chunks').textContent = rd.error ? 'Error' : (rd.indexed_chunks || 0).toLocaleString();
     } catch(e2) {
       document.getElementById('rag-chunks').textContent = '—';
     }
@@ -599,22 +826,12 @@ async function refresh() {
       const pct = m.total ? Math.round(m.completed / m.total * 100) : 0;
       const color = m.status === 'done' ? '#4ade80' :
                     m.status === 'generating' ? '#60a5fa' :
-                    m.status === 'exploring' ? '#60a5fa' :
                     m.status === 'failed' ? '#f87171' : '#374151';
       const current = m.current_page ? ` → ${m.current_page}` : '';
-
-      // Page chips
-      let pagesHtml = '';
-      if (m.total > 0) {
-        // Fetch pages from module data - we'll add this to API
-      }
-
       return `<div class="module-row">
         <div class="module-header" onclick="toggleModule(this)">
-          <div class="module-top">
-            <span class="module-name">${m.name}${current}</span>
-            <span class="badge badge-${m.status}">${m.status}</span>
-          </div>
+          <span class="module-name">${m.name}${current}</span>
+          <span class="badge badge-${m.status}">${m.status}</span>
           <span class="module-chevron">▶</span>
         </div>
         <div class="module-content">
@@ -624,9 +841,7 @@ async function refresh() {
             <span class="pend">${m.pending} pending</span>
             <span>${m.total} total</span>
           </div>
-          <div class="progress-bar">
-            <div class="progress-fill" style="width:${pct}%;background:${color}"></div>
-          </div>
+          <div class="progress-bar"><div class="progress-fill" style="width:${pct}%;background:${color}"></div></div>
           ${m.failed_pages.length > 0 || m.generating > 0 ? `
           <div class="pages-grid">
             ${m.generating > 0 && m.current_page ? `<div class="page-chip generating">⏳ ${m.current_page}</div>` : ''}
@@ -637,11 +852,27 @@ async function refresh() {
       </div>`;
     }).join('');
 
-    // Logs
+    // API Request Logs (newest first)
+    const apiLogBody = document.getElementById('api-log-body');
+    const wasAtBottomApi = apiLogBody.scrollHeight - apiLogBody.clientHeight <= apiLogBody.scrollTop + 10;
+    document.getElementById('api-log-count').textContent = apiLogs.length + ' requests';
+    document.getElementById('api-log-tbody').innerHTML = apiLogs.reverse().map(l =>
+      `<tr>
+        <td style="color:#6b7280">${l.time}</td>
+        <td><span class="method-badge ${methodClass(l.method)}">${l.method}</span></td>
+        <td>${l.path}</td>
+        <td class="${statusClass(l.status)}">${l.status}</td>
+        <td style="color:#6b7280">${formatDuration(l.duration_ms)}</td>
+        <td style="color:#9ca3af;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${l.detail || ''}</td>
+      </tr>`
+    ).join('');
+    if (wasAtBottomApi) apiLogBody.scrollTop = apiLogBody.scrollHeight;
+
+    // Pipeline Logs
     const logsEl = document.getElementById('logs-body');
     const wasAtBottom = logsEl.scrollHeight - logsEl.clientHeight <= logsEl.scrollTop + 10;
     logsEl.innerHTML = d.logs.map(l =>
-      `<div class="log-line ${logClass(l)}">${l}</div>`
+      `<div class="log-line ${pipelineLogClass(l)}">${l}</div>`
     ).join('');
     if (wasAtBottom) logsEl.scrollTop = logsEl.scrollHeight;
     document.getElementById('log-updated').textContent = new Date().toLocaleTimeString();
@@ -650,7 +881,7 @@ async function refresh() {
 }
 
 refresh();
-setInterval(refresh, 10000);
+setInterval(refresh, 5000);
 </script>
 </body>
 </html>"""

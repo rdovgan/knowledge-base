@@ -36,11 +36,16 @@ fi
 
 # ── Reset ───────────────────────────────────────────────────
 if [ "${1:-}" = "--reset" ]; then
+    echo "⚠️  This will delete ALL data (parsed, domains, vectorstore) and re-run from scratch."
+    read -p "Are you sure? [y/N] " confirm
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        echo "Cancelled."
+        exit 0
+    fi
     pkill -f "run_rag.py" 2>/dev/null || true
     rm -f .rag_pipeline.lock
-    rm -rf rag_v2/parsed rag_v2/domains rag_v2/vectorstore
-    rm -rf rag
-    echo "✅ All data deleted. Running from scratch..."
+    rm -rf data/parsed data/domains data/vectorstore
+    echo "✅ Data deleted. Running from scratch..."
     exec python3 run_rag.py all
 fi
 

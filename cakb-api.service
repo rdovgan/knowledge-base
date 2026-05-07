@@ -20,7 +20,7 @@ EnvironmentFile=/home/r.dovgan/cakb/.env
 # Security
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/home/r.dovgan/cakb/logs /home/r.dovgan/cakb/rag /home/r.dovgan/cakb/.rag_pipeline.lock
+ReadWritePaths=/home/r.dovgan/cakb/logs /home/r.dovgan/cakb/rag /home/r.dovgan/cakb/data /home/r.dovgan/cakb/.rag_pipeline.lock
 
 [Install]
 WantedBy=multi-user.target
