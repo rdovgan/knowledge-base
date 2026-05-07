@@ -774,7 +774,7 @@ def dashboard():
   .opt-group select:focus, .opt-group input[type=number]:focus { border-color: #2563eb; }
   .radio-pill { display: none; }
   .radio-pill + span { display: inline-block; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; border: 1px solid #2a2d3a; color: #6b7280; transition: all .15s; }
-  .radio-pill:checked + span { background: #1e3a5f; border-color: #2563eb; color: #60a5fa; }
+  .radio-pill:checked + span { background: #14532d; border-color: #22c55e; color: #4ade80; }
   .checkbox-pill { display: none; }
   .checkbox-pill + span { display: inline-block; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; border: 1px solid #2a2d3a; color: #6b7280; transition: all .15s; cursor: pointer; }
   .checkbox-pill:checked + span { background: #14532d; border-color: #22c55e; color: #4ade80; }
