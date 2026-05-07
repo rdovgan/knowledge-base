@@ -133,29 +133,127 @@ If the context is insufficient to fully answer, say so and explain what you can 
 Write in clear, structured Markdown."""
 
 
-def _do_ask(query: str, top_k: int, filter_metadata: Optional[dict], model_override: Optional[str] = None):
-    """Retrieve relevant chunks and generate LLM answer."""
+def _extract_keywords(query: str) -> list:
+    """Extract meaningful keywords from a query, dropping stopwords."""
+    import re
+    stopwords = {'how', 'does', 'the', 'a', 'an', 'is', 'are', 'was', 'were', 'do', 'does',
+                 'what', 'where', 'when', 'why', 'who', 'which', 'can', 'could', 'would',
+                 'should', 'will', 'shall', 'may', 'might', 'must', 'in', 'on', 'at', 'to',
+                 'for', 'of', 'with', 'by', 'from', 'it', 'its', 'this', 'that', 'and',
+                 'or', 'but', 'not', 'no', 'if', 'then', 'than', 'so', 'as', 'up', 'out',
+                 'about', 'into', 'over', 'after', 'work', 'working', 'system', 'flow',
+                 'process', 'please', 'explain', 'describe', 'tell', 'me', 'through'}
+    words = re.findall(r'[a-zA-Z_]+', query.lower())
+    keywords = [w for w in words if w not in stopwords and len(w) > 2]
+    return keywords
+
+
+def _keyword_search(keywords: list, top_k: int) -> list:
+    """Search ChromaDB by keyword containment — finds docs that mention specific terms."""
+    import chromadb
+
+    client = chromadb.PersistentClient(path=str(VECTORSTORE_DIR))
+    try:
+        collection = client.get_collection("wiki_java")
+    except Exception:
+        return []
+
+    results = []
+    for kw in keywords:
+        try:
+            r = collection.get(
+                where_document={"$contains": kw},
+                include=["documents", "metadatas"],
+                limit=top_k,
+            )
+            for i in range(len(r['ids'])):
+                results.append({
+                    'id': r['ids'][i],
+                    'text': r['documents'][i],
+                    'metadata': r['metadatas'][i],
+                    'distance': 1.0,  # keyword matches get distance 1.0
+                    '_keyword': kw,
+                })
+        except Exception:
+            continue
+
+    return results
+
+
+def _multi_query_retrieve(query: str, top_k: int, filter_metadata: Optional[dict]) -> list:
+    """Hybrid retrieval: semantic search + keyword search, merged & deduped."""
     from rag_pipeline.indexer import query_rag
 
-    # 1. Retrieve
-    results = query_rag(
-        query=query,
-        store_dir=str(VECTORSTORE_DIR),
-        collection_name="wiki_java",
-        top_k=top_k,
-        filter_metadata=filter_metadata,
-    )
+    seen = set()
+    all_results = []
 
-    if not results:
+    def _add(r):
+        dedup_key = r.get('metadata', {}).get('source_file', '') + ':' + r['text'][:100]
+        if dedup_key not in seen:
+            seen.add(dedup_key)
+            all_results.append(r)
+
+    # 1. Semantic search with original query
+    for r in query_rag(query=query, store_dir=str(VECTORSTORE_DIR),
+                       collection_name="wiki_java", top_k=top_k, filter_metadata=filter_metadata):
+        _add(r)
+
+    # 2. Keyword search — extract terms and find docs containing them
+    keywords = _extract_keywords(query)
+    kw_results = _keyword_search(keywords, top_k)
+    for r in kw_results:
+        _add(r)
+
+    # 3. Semantic search with keyword-focused sub-queries
+    if keywords:
+        # Combine keywords into meaningful pairs
+        sub_queries = []
+        if len(keywords) >= 2:
+            sub_queries.append(' '.join(keywords[:4]))  # first 4 keywords
+        # Add CamelCase variant (e.g., "inquiry reservation" → "InquiryReservation")
+        sub_queries.append(''.join(k.capitalize() for k in keywords[:3]))
+        # Add class-search variant
+        sub_queries.append('class ' + ' '.join(keywords[:3]))
+
+        for sq in sub_queries:
+            for r in query_rag(query=sq, store_dir=str(VECTORSTORE_DIR),
+                               collection_name="wiki_java", top_k=top_k // 2, filter_metadata=filter_metadata):
+                _add(r)
+
+    # Sort: semantic results by distance, keyword results after
+    all_results.sort(key=lambda x: x['distance'])
+    return all_results
+
+
+EXPANSION_PROMPT = """UNUSED"""
+
+
+def _expand_query(query: str, client) -> list:
+    """Not used — kept for compatibility."""
+    return [query]
+
+
+def _do_ask(query: str, top_k: int, filter_metadata: Optional[dict], model_override: Optional[str] = None, expand: bool = True):
+    """Retrieve relevant chunks (with query expansion) and generate LLM answer."""
+    from rag_pipeline.indexer import query_rag
+    from openai import OpenAI
+
+    client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+
+    # 2. Hybrid retrieval: semantic + keyword
+    all_results = _multi_query_retrieve(query, top_k, filter_metadata)
+
+    if not all_results:
         return AskResponse(
             query=query, answer="No relevant documents found in the knowledge base.",
             model="none", total_sources=0, sources=[],
         )
 
-    # 2. Build context
+    # 3. Build context (top N results after dedup)
+    max_context_results = min(len(all_results), top_k * 3)  # Allow more context
     context_parts = []
     sources = []
-    for i, r in enumerate(results, 1):
+    for i, r in enumerate(all_results[:max_context_results], 1):
         meta = r.get('metadata', {})
         source_file = meta.get('source_file', '?')
         domain = meta.get('domain', '')
@@ -173,15 +271,12 @@ def _do_ask(query: str, top_k: int, filter_metadata: Optional[dict], model_overr
 
     context = '\n\n---\n\n'.join(context_parts)
 
-    # 3. Call LLM
-    from openai import OpenAI
-    client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
-
+    # 4. Call LLM with full context
     model = model_override or LLM_MODEL
     answer = None
 
     for m in [model, LLM_FALLBACK]:
-        if not m or m == model and answer is not None:
+        if not m or (m == model and answer is not None):
             continue
         try:
             response = client.chat.completions.create(
@@ -206,7 +301,7 @@ def _do_ask(query: str, top_k: int, filter_metadata: Optional[dict], model_overr
 
     return AskResponse(
         query=query, answer=answer, model=model,
-        total_sources=len(results), sources=sources,
+        total_sources=len(all_results[:max_context_results]), sources=sources,
     )
 
 
@@ -499,10 +594,12 @@ async function refresh() {
         <div class="progress-bar">
           <div class="progress-fill" style="width:${pct}%;background:${color}"></div>
         </div>
+        ${m.failed_pages.length > 0 || m.generating > 0 ? `
         <div class="pages-grid">
-          ${m.completed_pages.map(p => `<div class="page-chip done">✓ ${p}</div>`).join('')}
-          ${m.failed_pages.map(p => `<div class="page-chip failed">✗ ${p}</div>`).join('')}
-        </div>
+          ${m.generating > 0 && m.current_page ? `<div class="page-chip generating">⏳ ${m.current_page}</div>` : ''}
+          ${m.failed_pages.slice(0, 10).map(p => `<div class="page-chip failed">✗ ${p}</div>`).join('')}
+          ${m.failed_pages.length > 10 ? `<div class="page-chip failed">+${m.failed_pages.length - 10} more</div>` : ''}
+        </div>` : ''}
       </div>`;
     }).join('');
 
