@@ -130,6 +130,8 @@ def api_query(req: QueryRequest):
     )
     if req.format == "md":
         return PlainTextResponse(_format_query_md(resp), media_type="text/markdown")
+    if req.format == "human":
+        return PlainTextResponse(_humanize_query(resp), media_type="text/markdown")
     return resp
 
 
@@ -152,6 +154,8 @@ def api_query_get(q: str = QueryParam(..., alias="q"), top_k: int = 5, format: O
     resp = QueryResponse(query=q, total_results=len(results), results=results)
     if format == "md":
         return PlainTextResponse(_format_query_md(resp), media_type="text/markdown")
+    if format == "human":
+        return PlainTextResponse(_humanize_query(resp), media_type="text/markdown")
     return resp
 
 
@@ -358,6 +362,65 @@ def _format_ask_md(resp: AskResponse) -> str:
     return "\n".join(lines)
 
 
+def _humanize_ask(resp: AskResponse) -> str:
+    """Call LLM to rewrite AskResponse as polished human-readable Markdown."""
+    from openai import OpenAI
+    client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+    sources_text = "\n".join(
+        f"- {s.get('source_file', '?')} ({s.get('domain', '')} / {s.get('module', '')})"
+        for s in resp.sources
+    )
+    payload = (
+        f"## Question\n{resp.query}\n\n"
+        f"## Answer\n{resp.answer}\n\n"
+        f"## Sources\n{sources_text}"
+    )
+    prompt = (
+        "You are a technical writer. Rewrite the following knowledge base response "
+        "into clear, well-structured Markdown for a non-expert reader. "
+        "Use headings, bullet points, and plain language. "
+        "Omit raw file paths and distance scores unless essential. Be concise.\n\n"
+        + payload
+    )
+    try:
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4,
+            max_tokens=4000,
+        )
+        return response.choices[0].message.content
+    except Exception:
+        return _format_ask_md(resp)
+
+
+def _humanize_query(resp: QueryResponse) -> str:
+    """Call LLM to synthesize QueryResponse chunks into human-readable Markdown."""
+    from openai import OpenAI
+    client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+    chunks = "\n\n---\n\n".join(
+        r.get('text', str(r)) if isinstance(r, dict) else str(r)
+        for r in resp.results
+    )
+    payload = f"## Search query\n{resp.query}\n\n## Retrieved chunks\n\n{chunks}"
+    prompt = (
+        "You are a technical writer. Synthesize the following retrieved knowledge base chunks "
+        "into a single clear, well-structured Markdown document for a non-expert reader. "
+        "Use headings and bullet points. Avoid repeating the same information. Be concise.\n\n"
+        + payload
+    )
+    try:
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4,
+            max_tokens=4000,
+        )
+        return response.choices[0].message.content
+    except Exception:
+        return _format_query_md(resp)
+
+
 def _expand_query(query: str, client) -> list:
     """Not used — kept for compatibility."""
     return [query]
@@ -451,6 +514,8 @@ def api_ask(req: AskRequest):
         _api_log("POST", "/api/ask", 200, duration, req.query[:80])
         if req.format == "md":
             return PlainTextResponse(_format_ask_md(result), media_type="text/markdown")
+        if req.format == "human":
+            return PlainTextResponse(_humanize_ask(result), media_type="text/markdown")
         return result
     except Exception as e:
         duration = (datetime.now() - start).total_seconds() * 1000
@@ -472,6 +537,8 @@ def api_ask_get(q: str = QueryParam(..., alias="q"), top_k: int = 10, format: Op
     _api_log("GET", "/api/ask", 200, duration, q[:80])
     if format == "md":
         return PlainTextResponse(_format_ask_md(result), media_type="text/markdown")
+    if format == "human":
+        return PlainTextResponse(_humanize_ask(result), media_type="text/markdown")
     return result
 
 
@@ -766,7 +833,9 @@ def dashboard():
         <label><input type="radio" name="q-endpoint" class="radio-pill" value="query"><span>Search</span></label>
       </div>
       <div class="opt-group">
-        <label><input type="checkbox" id="q-format-md" class="checkbox-pill"><span>Markdown</span></label>
+        <label><input type="radio" name="q-format" class="radio-pill" value="" checked><span>JSON</span></label>
+        <label><input type="radio" name="q-format" class="radio-pill" value="md"><span>Markdown</span></label>
+        <label><input type="radio" name="q-format" class="radio-pill" value="human"><span>Human</span></label>
       </div>
       <div class="opt-group">
         <label>top_k <input type="number" id="q-topk" value="10" min="1" max="50" style="width:60px"></label>
@@ -829,9 +898,9 @@ def dashboard():
           <tr><td>top_k</td><td>int, default 10 — Number of chunks to retrieve</td></tr>
           <tr><td>filter</td><td>object, optional — Metadata filter, e.g. {"module": "mbp"}</td></tr>
           <tr><td>model</td><td>string, optional — Override LLM model name</td></tr>
-          <tr><td>format</td><td>string, optional — Set to &quot;md&quot; to get human-readable Markdown instead of JSON</td></tr>
+          <tr><td>format</td><td>string, optional — &quot;md&quot; for template Markdown, &quot;human&quot; for LLM-rewritten Markdown</td></tr>
         </table>
-        <p class="response-hint">Returns JSON: { query, answer, model, total_sources, sources[] } — or plain Markdown when format=md</p>
+        <p class="response-hint">Returns JSON: { query, answer, model, total_sources, sources[] } — or Markdown when format=md/human</p>
       </div>
 
       <div class="api-section">
@@ -854,9 +923,9 @@ def dashboard():
           <tr><td>query</td><td>string — Search query text</td></tr>
           <tr><td>top_k</td><td>int, default 5 — Number of results</td></tr>
           <tr><td>filter</td><td>object, optional — Metadata filter, e.g. {&quot;module&quot;: &quot;mbp&quot;}</td></tr>
-          <tr><td>format</td><td>string, optional — Set to &quot;md&quot; to get human-readable Markdown instead of JSON</td></tr>
+          <tr><td>format</td><td>string, optional — &quot;md&quot; for template Markdown, &quot;human&quot; for LLM-synthesized Markdown</td></tr>
         </table>
-        <p class="response-hint">Returns JSON: { query, total_results, results[] } — or plain Markdown when format=md</p>
+        <p class="response-hint">Returns JSON: { query, total_results, results[] } — or Markdown when format=md/human</p>
       </div>
 
       <div class="api-section">
@@ -1049,7 +1118,7 @@ async function sendQuery() {
   if (!query) return;
 
   const endpoint = document.querySelector('input[name="q-endpoint"]:checked').value;
-  const asMd = document.getElementById('q-format-md').checked;
+  const fmt = document.querySelector('input[name="q-format"]:checked').value || null;
   const topK = parseInt(document.getElementById('q-topk').value) || 10;
 
   btn.disabled = true;
@@ -1064,13 +1133,13 @@ async function sendQuery() {
       resp = await fetch('/api/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, top_k: topK, format: asMd ? 'md' : null })
+        body: JSON.stringify({ query, top_k: topK, format: fmt })
       });
     } else {
       resp = await fetch('/api/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, top_k: topK, format: asMd ? 'md' : null })
+        body: JSON.stringify({ query, top_k: topK, format: fmt })
       });
     }
     const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
@@ -1082,10 +1151,11 @@ async function sendQuery() {
     }
 
     const ct = resp.headers.get('content-type') || '';
-    if (ct.includes('text/') || asMd) {
+    if (ct.includes('text/') || fmt) {
       const text = await resp.text();
       resultEl.value = text;
-      metaEl.textContent = `${endpoint.toUpperCase()} · ${elapsed}s · Markdown response`;
+      const fmtLabel = fmt === 'human' ? 'Human-readable' : 'Markdown';
+      metaEl.textContent = `${endpoint.toUpperCase()} · ${elapsed}s · ${fmtLabel} response`;
     } else {
       const data = await resp.json();
       resultEl.value = JSON.stringify(data, null, 2);
