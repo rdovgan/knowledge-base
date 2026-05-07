@@ -1,0 +1,26 @@
+[Unit]
+Description=CAKB RAG Pipeline & Query API
+After=network.target
+
+[Service]
+Type=simple
+User=r.dovogan
+Group=backend
+WorkingDirectory=/home/r.dovgan/cakb
+ExecStart=/usr/bin/python3 /home/r.dovgan/cakb/dashboard.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/r.dovgan/cakb/logs/dashboard.log
+StandardError=append:/home/r.dovgan/cakb/logs/dashboard.log
+
+# Environment
+Environment=PATH=/usr/bin:/usr/local/bin:/home/r.dovgan/cakb/venv/bin
+EnvironmentFile=/home/r.dovgan/cakb/.env
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/r.dovgan/cakb/logs /home/r.dovgan/cakb/rag /home/r.dovgan/cakb/.rag_pipeline.lock
+
+[Install]
+WantedBy=multi-user.target

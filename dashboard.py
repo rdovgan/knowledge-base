@@ -1,22 +1,235 @@
 """
-Dashboard — web UI for monitoring the RAG pipeline.
-Reads state from pipeline_state.json (no task-master CLI needed).
+Dashboard + RAG Query API — web UI for monitoring the RAG pipeline
+and an HTTP API for querying the knowledge base.
+
+Endpoints:
+  GET  /              — Dashboard UI
+  GET  /api/status     — Pipeline status
+  POST /api/query      — Semantic search (chunks only)
+  POST /api/ask        — RAG: search + LLM detailed answer
+  GET  /api/ask        — RAG via GET
+  GET  /api/status-rag — RAG index stats
 """
 
 import json
 import os
 from datetime import datetime
 from pathlib import Path
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from typing import Optional
+from fastapi import FastAPI, Query as QueryParam
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
 import uvicorn
 import subprocess
 
-app = FastAPI()
+app = FastAPI(title="CAKB — RAG Pipeline & Query API")
 
-RAG_DIR = Path("/home/r.dovgan/cakb/rag")
-LOG_FILE = Path("/home/r.dovgan/cakb/logs/pipeline.log")
-STATE_FILE = Path("/home/r.dovgan/cakb/pipeline_state.json")
+PROJECT_ROOT = Path("/home/r.dovgan/cakb")
+RAG_DIR = PROJECT_ROOT / "rag"
+LOG_FILE = PROJECT_ROOT / "logs" / "pipeline.log"
+STATE_FILE = PROJECT_ROOT / "pipeline_state.json"
+VECTORSTORE_DIR = RAG_DIR / "vectorstore"
+
+
+def load_env():
+    env_file = PROJECT_ROOT / ".env"
+    if env_file.exists():
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, _, val = line.partition('=')
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+
+# ── RAG Query models ────────────────────────────────────────────
+
+class QueryRequest(BaseModel):
+    query: str
+    top_k: int = 5
+    # Optional metadata filter, e.g. {"module": "mbp"}
+    filter: Optional[dict] = None
+
+class QueryResponse(BaseModel):
+    query: str
+    total_results: int
+    results: list
+
+class AskRequest(BaseModel):
+    query: str
+    top_k: int = 10
+    filter: Optional[dict] = None
+    model: Optional[str] = None       # override default LLM model
+
+class AskResponse(BaseModel):
+    query: str
+    answer: str
+    model: str
+    total_sources: int
+    sources: list
+
+# ── RAG Query endpoint ──────────────────────────────────────────
+
+@app.post("/api/query", response_model=QueryResponse)
+def api_query(req: QueryRequest):
+    """Query the RAG knowledge base.
+
+    Example:
+        curl -X POST http://localhost:8090/api/query \
+          -H 'Content-Type: application/json' \
+          -d '{"query": "how does booking work?", "top_k": 5}'
+    """
+    from rag_pipeline.indexer import query_rag
+
+    results = query_rag(
+        query=req.query,
+        store_dir=str(VECTORSTORE_DIR),
+        collection_name="wiki_java",
+        top_k=req.top_k,
+        filter_metadata=req.filter,
+    )
+    return QueryResponse(
+        query=req.query,
+        total_results=len(results),
+        results=results,
+    )
+
+
+@app.get("/api/query")
+def api_query_get(q: str = QueryParam(..., alias="q"), top_k: int = 5):
+    """Query via GET (convenient for browser / curl).
+
+    Example:
+        curl 'http://localhost:8090/api/query?q=how+does+booking+work&top_k=3'
+    """
+    from rag_pipeline.indexer import query_rag
+
+    results = query_rag(
+        query=q,
+        store_dir=str(VECTORSTORE_DIR),
+        collection_name="wiki_java",
+        top_k=top_k,
+    )
+    return QueryResponse(query=q, total_results=len(results), results=results)
+
+
+# ── RAG Ask endpoint (search + LLM answer) ──────────────────────
+
+# Load LLM config from .env
+load_env()
+LLM_API_KEY = os.environ.get("ZAI_API_KEY", "")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
+LLM_MODEL = os.environ.get("LLM_MODEL", "glm-5-turbo")
+LLM_FALLBACK = os.environ.get("LLM_FALLBACK_MODEL", "glm-4.7")
+
+SYSTEM_PROMPT = """You are a senior Java/Spring Boot architect with deep knowledge of this codebase.
+Answer the user's question using ONLY the provided context from the knowledge base.
+Be specific: reference actual class names, method names, package names, and configuration keys.
+Explain data flows step by step. Include sequence descriptions where helpful.
+If the context is insufficient to fully answer, say so and explain what you can determine.
+Write in clear, structured Markdown."""
+
+
+def _do_ask(query: str, top_k: int, filter_metadata: Optional[dict], model_override: Optional[str] = None):
+    """Retrieve relevant chunks and generate LLM answer."""
+    from rag_pipeline.indexer import query_rag
+
+    # 1. Retrieve
+    results = query_rag(
+        query=query,
+        store_dir=str(VECTORSTORE_DIR),
+        collection_name="wiki_java",
+        top_k=top_k,
+        filter_metadata=filter_metadata,
+    )
+
+    if not results:
+        return AskResponse(
+            query=query, answer="No relevant documents found in the knowledge base.",
+            model="none", total_sources=0, sources=[],
+        )
+
+    # 2. Build context
+    context_parts = []
+    sources = []
+    for i, r in enumerate(results, 1):
+        meta = r.get('metadata', {})
+        source_file = meta.get('source_file', '?')
+        domain = meta.get('domain', '')
+        module = meta.get('module', '')
+        context_parts.append(f"### Source {i}: {source_file}"
+                             f"{' — ' + domain if domain else ''}" 
+                             f"{' (' + module + ')' if module else ''}\n\n"
+                             f"{r['text']}")
+        sources.append({
+            "source_file": source_file,
+            "domain": domain,
+            "module": module,
+            "distance": round(r['distance'], 4),
+        })
+
+    context = '\n\n---\n\n'.join(context_parts)
+
+    # 3. Call LLM
+    from openai import OpenAI
+    client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+
+    model = model_override or LLM_MODEL
+    answer = None
+
+    for m in [model, LLM_FALLBACK]:
+        if not m or m == model and answer is not None:
+            continue
+        try:
+            response = client.chat.completions.create(
+                model=m,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": f"## Context from knowledge base\n\n{context}\n\n---\n\n## Question\n{query}"},
+                ],
+                temperature=0.3,
+                max_tokens=4000,
+            )
+            answer = response.choices[0].message.content
+            model = m
+            break
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"LLM call failed for model {m}: {e}")
+            continue
+
+    if answer is None:
+        answer = "LLM call failed. Try again later."
+
+    return AskResponse(
+        query=query, answer=answer, model=model,
+        total_sources=len(results), sources=sources,
+    )
+
+
+@app.post("/api/ask", response_model=AskResponse)
+def api_ask(req: AskRequest):
+    """RAG query: retrieve relevant chunks + generate LLM answer.
+
+    Example:
+        curl -X POST http://localhost:8090/api/ask \
+          -H 'Content-Type: application/json' \
+          -d '{"query": "how does a booking flow from Booking.com through the system?", "top_k": 10}'
+    """
+    return _do_ask(req.query, req.top_k, req.filter, req.model)
+
+
+@app.get("/api/ask")
+def api_ask_get(q: str = QueryParam(..., alias="q"), top_k: int = 10):
+    """RAG query via GET.
+
+    Example:
+        curl 'http://localhost:8090/api/ask?q=how+does+reservation+clarity+work&top_k=8'
+    """
+    return _do_ask(q, top_k, None)
 
 
 def get_state():
@@ -59,6 +272,18 @@ def get_total_pages() -> int:
         return 0
     return len([f for f in RAG_DIR.rglob("*.md")
                 if f.name not in ("index.md", "README.md")])
+
+
+@app.get("/api/status-rag")
+def api_status_rag():
+    """RAG index stats."""
+    try:
+        import chromadb
+        client = chromadb.PersistentClient(path=str(VECTORSTORE_DIR))
+        coll = client.get_collection("wiki_java")
+        return {"indexed_chunks": coll.count(), "collection": "wiki_java"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/api/status")
