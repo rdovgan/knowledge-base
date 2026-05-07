@@ -37,6 +37,8 @@ _api_log_lock = threading.Lock()
 _api_logs = deque(maxlen=200)  # keep last 200 entries
 
 def _api_log(method: str, path: str, status: int, duration_ms: float, detail: str = ""):
+    if path in ("/api/status", "/api/status-rag"):
+        return
     with _api_log_lock:
         _api_logs.append({
             "time": datetime.now().strftime("%H:%M:%S"),
@@ -774,7 +776,8 @@ def dashboard():
   .opt-group select:focus, .opt-group input[type=number]:focus { border-color: #2563eb; }
   .radio-pill { display: none; }
   .radio-pill + span { display: inline-block; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; border: 1px solid #2a2d3a; color: #6b7280; transition: all .15s; }
-  .radio-pill:checked + span { background: #14532d; border-color: #22c55e; color: #4ade80; }
+  .radio-pill:checked + span { background: #1e3a5f; border-color: #2563eb; color: #60a5fa; }
+  .radio-green:checked + span { background: #14532d; border-color: #22c55e; color: #4ade80; }
   .checkbox-pill { display: none; }
   .checkbox-pill + span { display: inline-block; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; border: 1px solid #2a2d3a; color: #6b7280; transition: all .15s; cursor: pointer; }
   .checkbox-pill:checked + span { background: #14532d; border-color: #22c55e; color: #4ade80; }
@@ -833,9 +836,9 @@ def dashboard():
         <label><input type="radio" name="q-endpoint" class="radio-pill" value="query"><span>Search</span></label>
       </div>
       <div class="opt-group">
-        <label><input type="radio" name="q-format" class="radio-pill" value="" checked><span>JSON</span></label>
-        <label><input type="radio" name="q-format" class="radio-pill" value="md"><span>Markdown</span></label>
-        <label><input type="radio" name="q-format" class="radio-pill" value="human"><span>Human</span></label>
+        <label><input type="radio" name="q-format" class="radio-pill radio-green" value="" checked><span>JSON</span></label>
+        <label><input type="radio" name="q-format" class="radio-pill radio-green" value="md"><span>Markdown</span></label>
+        <label><input type="radio" name="q-format" class="radio-pill radio-green" value="human"><span>Human</span></label>
       </div>
       <div class="opt-group">
         <label>top_k <input type="number" id="q-topk" value="10" min="1" max="50" style="width:60px"></label>
