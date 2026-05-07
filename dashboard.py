@@ -465,11 +465,16 @@ def dashboard():
 
   .modules { background: #1a1d27; border-radius: 12px; border: 1px solid #2a2d3a; margin-bottom: 24px; overflow: hidden; }
   .modules-header { padding: 16px 20px; border-bottom: 1px solid #2a2d3a; font-weight: 600; font-size: 14px; }
-  .module-row { padding: 12px 20px; border-bottom: 1px solid #1e2130; transition: background .15s; cursor: pointer; }
+  .module-row { border-bottom: 1px solid #1e2130; }
   .module-row:last-child { border-bottom: none; }
-  .module-row:hover { background: #1e2130; }
-  .module-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .module-header { padding: 12px 20px; transition: background .15s; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+  .module-header:hover { background: #1e2130; }
+  .module-top { display: flex; justify-content: space-between; align-items: center; }
   .module-name { font-weight: 500; font-size: 14px; }
+  .module-chevron { margin-left: 8px; transition: transform 0.2s; font-size: 12px; color: #6b7280; }
+  .module-chevron.expanded { transform: rotate(90deg); }
+  .module-content { padding: 0 20px 12px 20px; display: none; }
+  .module-content.expanded { display: block; }
   .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
   .badge-done { background: #14532d; color: #4ade80; }
   .badge-exploring { background: #1e3a5f; color: #60a5fa; }
@@ -526,6 +531,10 @@ def dashboard():
     <div class="card-label">Modules Done</div>
     <div class="card-value" id="modules-done">—</div>
   </div>
+  <div class="card">
+    <div class="card-label">RAG Index Chunks</div>
+    <div class="card-value blue" id="rag-chunks">—</div>
+  </div>
 </div>
 
 <div class="modules">
@@ -542,6 +551,13 @@ def dashboard():
 </div>
 
 <script>
+function toggleModule(header) {
+  const content = header.nextElementSibling;
+  const chevron = header.querySelector('.module-chevron');
+  content.classList.toggle('expanded');
+  chevron.classList.toggle('expanded');
+}
+
 function logClass(line) {
   if (line.includes('ERROR') || line.includes('❌')) return 'error';
   if (line.includes('WARNING') || line.includes('⚠')) return 'warning';
@@ -564,6 +580,19 @@ async function refresh() {
     document.getElementById('modules-done').textContent = d.done_modules + '/' + d.total_modules;
     document.getElementById('updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
 
+    // RAG status
+    try {
+      const rr = await fetch('/api/status-rag');
+      const rd = await rr.json();
+      if (rd.error) {
+        document.getElementById('rag-chunks').textContent = 'Error';
+      } else {
+        document.getElementById('rag-chunks').textContent = rd.indexed_chunks.toLocaleString();
+      }
+    } catch(e2) {
+      document.getElementById('rag-chunks').textContent = '—';
+    }
+
     // Modules
     const list = document.getElementById('modules-list');
     list.innerHTML = d.modules.map(m => {
@@ -581,25 +610,30 @@ async function refresh() {
       }
 
       return `<div class="module-row">
-        <div class="module-top">
-          <span class="module-name">${m.name}${current}</span>
-          <span class="badge badge-${m.status}">${m.status}</span>
+        <div class="module-header" onclick="toggleModule(this)">
+          <div class="module-top">
+            <span class="module-name">${m.name}${current}</span>
+            <span class="badge badge-${m.status}">${m.status}</span>
+          </div>
+          <span class="module-chevron">▶</span>
         </div>
-        <div class="module-stats">
-          <span class="done">${m.completed} done</span>
-          <span class="fail">${m.failed} failed</span>
-          <span class="pend">${m.pending} pending</span>
-          <span>${m.total} total</span>
+        <div class="module-content">
+          <div class="module-stats">
+            <span class="done">${m.completed} done</span>
+            <span class="fail">${m.failed} failed</span>
+            <span class="pend">${m.pending} pending</span>
+            <span>${m.total} total</span>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-fill" style="width:${pct}%;background:${color}"></div>
+          </div>
+          ${m.failed_pages.length > 0 || m.generating > 0 ? `
+          <div class="pages-grid">
+            ${m.generating > 0 && m.current_page ? `<div class="page-chip generating">⏳ ${m.current_page}</div>` : ''}
+            ${m.failed_pages.slice(0, 10).map(p => `<div class="page-chip failed">✗ ${p}</div>`).join('')}
+            ${m.failed_pages.length > 10 ? `<div class="page-chip failed">+${m.failed_pages.length - 10} more</div>` : ''}
+          </div>` : ''}
         </div>
-        <div class="progress-bar">
-          <div class="progress-fill" style="width:${pct}%;background:${color}"></div>
-        </div>
-        ${m.failed_pages.length > 0 || m.generating > 0 ? `
-        <div class="pages-grid">
-          ${m.generating > 0 && m.current_page ? `<div class="page-chip generating">⏳ ${m.current_page}</div>` : ''}
-          ${m.failed_pages.slice(0, 10).map(p => `<div class="page-chip failed">✗ ${p}</div>`).join('')}
-          ${m.failed_pages.length > 10 ? `<div class="page-chip failed">+${m.failed_pages.length - 10} more</div>` : ''}
-        </div>` : ''}
       </div>`;
     }).join('');
 
