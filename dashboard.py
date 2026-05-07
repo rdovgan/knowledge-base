@@ -5,9 +5,10 @@ and an HTTP API for querying the knowledge base.
 Endpoints:
   GET  /              — Dashboard UI
   GET  /api/status     — Pipeline status
-  POST /api/query      — Semantic search (chunks only)
-  POST /api/ask        — RAG: search + LLM detailed answer
-  GET  /api/ask        — RAG via GET
+  POST /api/query      — Semantic search (chunks only, ?format=md for Markdown)
+  GET  /api/query      — Same via GET (?q=...&format=md)
+  POST /api/ask        — RAG: search + LLM answer (format=md for Markdown)
+  GET  /api/ask        — Same via GET (?q=...&format=md)
   GET  /api/status-rag — RAG index stats
 """
 
@@ -17,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, Query as QueryParam
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 import logging
 import uvicorn
@@ -80,6 +81,7 @@ class QueryRequest(BaseModel):
     top_k: int = 5
     # Optional metadata filter, e.g. {"module": "mbp"}
     filter: Optional[dict] = None
+    format: Optional[str] = None  # "md" for human-readable Markdown response
 
 class QueryResponse(BaseModel):
     query: str
@@ -91,6 +93,7 @@ class AskRequest(BaseModel):
     top_k: int = 10
     filter: Optional[dict] = None
     model: Optional[str] = None       # override default LLM model
+    format: Optional[str] = None      # "md" for human-readable Markdown response
 
 class AskResponse(BaseModel):
     query: str
@@ -101,14 +104,14 @@ class AskResponse(BaseModel):
 
 # ── RAG Query endpoint ──────────────────────────────────────────
 
-@app.post("/api/query", response_model=QueryResponse)
+@app.post("/api/query")
 def api_query(req: QueryRequest):
     """Query the RAG knowledge base.
 
     Example:
         curl -X POST http://localhost:8090/api/query \
           -H 'Content-Type: application/json' \
-          -d '{"query": "how does booking work?", "top_k": 5}'
+          -d '{"query": "how does booking work?", "top_k": 5, "format": "md"}'
     """
     from rag_pipeline.indexer import query_rag
 
@@ -120,19 +123,22 @@ def api_query(req: QueryRequest):
         filter_metadata=req.filter,
     )
     _api_log("POST", "/api/query", 200, 0, req.query[:80])
-    return QueryResponse(
+    resp = QueryResponse(
         query=req.query,
         total_results=len(results),
         results=results,
     )
+    if req.format == "md":
+        return PlainTextResponse(_format_query_md(resp), media_type="text/markdown")
+    return resp
 
 
 @app.get("/api/query")
-def api_query_get(q: str = QueryParam(..., alias="q"), top_k: int = 5):
+def api_query_get(q: str = QueryParam(..., alias="q"), top_k: int = 5, format: Optional[str] = None):
     """Query via GET (convenient for browser / curl).
 
     Example:
-        curl 'http://localhost:8090/api/query?q=how+does+booking+work&top_k=3'
+        curl 'http://localhost:8090/api/query?q=how+does+booking+work&top_k=3&format=md'
     """
     from rag_pipeline.indexer import query_rag
 
@@ -143,7 +149,10 @@ def api_query_get(q: str = QueryParam(..., alias="q"), top_k: int = 5):
         top_k=top_k,
     )
     _api_log("GET", "/api/query", 200, 0, q[:80])
-    return QueryResponse(query=q, total_results=len(results), results=results)
+    resp = QueryResponse(query=q, total_results=len(results), results=results)
+    if format == "md":
+        return PlainTextResponse(_format_query_md(resp), media_type="text/markdown")
+    return resp
 
 
 # ── RAG Ask endpoint (search + LLM answer) ──────────────────────
@@ -279,6 +288,76 @@ def _multi_query_retrieve(query: str, top_k: int, filter_metadata: Optional[dict
 EXPANSION_PROMPT = """UNUSED"""
 
 
+def _format_query_md(resp: QueryResponse) -> str:
+    """Render QueryResponse as human-readable Markdown."""
+    lines = [
+        f"# Search Results",
+        f"",
+        f"**Query:** {resp.query}  ",
+        f"**Results:** {resp.total_results}",
+        f"",
+        f"---",
+        f"",
+    ]
+    for i, r in enumerate(resp.results, 1):
+        meta = r.get('metadata', {}) if isinstance(r, dict) else {}
+        source = meta.get('source_file', '—')
+        domain = meta.get('domain', '')
+        module = meta.get('module', '')
+        distance = r.get('distance', '—') if isinstance(r, dict) else '—'
+        text = r.get('text', str(r)) if isinstance(r, dict) else str(r)
+
+        lines.append(f"## Result {i}")
+        lines.append("")
+        lines.append(f"**Source:** `{source}`  ")
+        if domain:
+            lines.append(f"**Domain:** {domain}  ")
+        if module:
+            lines.append(f"**Module:** {module}  ")
+        lines.append(f"**Distance:** {distance}")
+        lines.append("")
+        lines.append(text)
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _format_ask_md(resp: AskResponse) -> str:
+    """Render AskResponse as human-readable Markdown."""
+    lines = [
+        f"# Answer",
+        f"",
+        f"**Query:** {resp.query}  ",
+        f"**Model:** {resp.model}  ",
+        f"**Sources used:** {resp.total_sources}",
+        f"",
+        f"---",
+        f"",
+        resp.answer,
+        f"",
+        f"---",
+        f"",
+        f"## Sources",
+        f""]
+    for i, s in enumerate(resp.sources, 1):
+        source = s.get('source_file', '—') if isinstance(s, dict) else '—'
+        domain = s.get('domain', '') if isinstance(s, dict) else ''
+        module = s.get('module', '') if isinstance(s, dict) else ''
+        distance = s.get('distance', '—') if isinstance(s, dict) else '—'
+        lines.append(f"{i}. **{source}**")
+        if domain or module:
+            parts = []
+            if domain:
+                parts.append(f"domain: {domain}")
+            if module:
+                parts.append(f"module: {module}")
+            lines.append(f"   _{', '.join(parts)}_  ")
+        lines.append(f"   distance: `{distance}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _expand_query(query: str, client) -> list:
     """Not used — kept for compatibility."""
     return [query]
@@ -356,20 +435,22 @@ def _do_ask(query: str, top_k: int, filter_metadata: Optional[dict], model_overr
     )
 
 
-@app.post("/api/ask", response_model=AskResponse)
+@app.post("/api/ask")
 def api_ask(req: AskRequest):
     """RAG query: retrieve relevant chunks + generate LLM answer.
 
     Example:
         curl -X POST http://localhost:8090/api/ask \
           -H 'Content-Type: application/json' \
-          -d '{"query": "how does a booking flow from Booking.com through the system?", "top_k": 10}'
+          -d '{"query": "how does a booking flow from Booking.com through the system?", "top_k": 10, "format": "md"}'
     """
     start = datetime.now()
     try:
         result = _do_ask(req.query, req.top_k, req.filter, req.model)
         duration = (datetime.now() - start).total_seconds() * 1000
         _api_log("POST", "/api/ask", 200, duration, req.query[:80])
+        if req.format == "md":
+            return PlainTextResponse(_format_ask_md(result), media_type="text/markdown")
         return result
     except Exception as e:
         duration = (datetime.now() - start).total_seconds() * 1000
@@ -380,16 +461,18 @@ def api_ask(req: AskRequest):
 
 
 @app.get("/api/ask")
-def api_ask_get(q: str = QueryParam(..., alias="q"), top_k: int = 10):
+def api_ask_get(q: str = QueryParam(..., alias="q"), top_k: int = 10, format: Optional[str] = None):
     """RAG query via GET.
 
     Example:
-        curl 'http://localhost:8090/api/ask?q=how+does+reservation+clarity+work&top_k=8'
+        curl 'http://localhost:8090/api/ask?q=how+does+reservation+clarity+work&top_k=8&format=md'
     """
     start = datetime.now()
     result = _do_ask(q, top_k, None)
     duration = (datetime.now() - start).total_seconds() * 1000
     _api_log("GET", "/api/ask", 200, duration, q[:80])
+    if format == "md":
+        return PlainTextResponse(_format_ask_md(result), media_type="text/markdown")
     return result
 
 
@@ -690,14 +773,15 @@ def dashboard():
           <tr><td>top_k</td><td>int, default 10 — Number of chunks to retrieve</td></tr>
           <tr><td>filter</td><td>object, optional — Metadata filter, e.g. {"module": "mbp"}</td></tr>
           <tr><td>model</td><td>string, optional — Override LLM model name</td></tr>
+          <tr><td>format</td><td>string, optional — Set to &quot;md&quot; to get human-readable Markdown instead of JSON</td></tr>
         </table>
-        <p class="response-hint">Returns: { query, answer (Markdown), model, total_sources, sources[] }</p>
+        <p class="response-hint">Returns JSON: { query, answer, model, total_sources, sources[] } — or plain Markdown when format=md</p>
       </div>
 
       <div class="api-section">
         <h3>GET /api/ask — Quick RAG via URL params</h3>
-        <p>Same as POST but via GET — handy for quick browser tests.</p>
-        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl 'http://localhost:8090/api/ask?q=how+does+booking+work&top_k=8'</div>
+        <p>Same as POST but via GET — handy for quick browser tests. Add <code>&amp;format=md</code> for readable Markdown.</p>
+        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl 'http://localhost:8090/api/ask?q=how+does+booking+work&top_k=8&format=md'</div>
       </div>
 
       <div class="api-section">
@@ -710,12 +794,18 @@ def dashboard():
     "top_k": 5,
     "filter": {"module": "mbp"}
   }'</div>
-        <p class="response-hint">Returns: { query, total_results, results[{id, text, metadata, distance}] }</p>
+        <table class="param-table">
+          <tr><td>query</td><td>string — Search query text</td></tr>
+          <tr><td>top_k</td><td>int, default 5 — Number of results</td></tr>
+          <tr><td>filter</td><td>object, optional — Metadata filter, e.g. {&quot;module&quot;: &quot;mbp&quot;}</td></tr>
+          <tr><td>format</td><td>string, optional — Set to &quot;md&quot; to get human-readable Markdown instead of JSON</td></tr>
+        </table>
+        <p class="response-hint">Returns JSON: { query, total_results, results[] } — or plain Markdown when format=md</p>
       </div>
 
       <div class="api-section">
         <h3>GET /api/query — Quick search via URL params</h3>
-        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl 'http://localhost:8090/api/query?q=InquiryReservation&top_k=3'</div>
+        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl 'http://localhost:8090/api/query?q=InquiryReservation&top_k=3&format=md'</div>
       </div>
 
       <div class="api-section">
@@ -737,13 +827,22 @@ def dashboard():
         <h3>Python Example</h3>
         <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>import requests
 
+# JSON response
 resp = requests.post("http://localhost:8090/api/ask", json={
     "query": "How does the pricing engine calculate nightly rates?",
     "top_k": 10
 })
 data = resp.json()
 print(data["answer"])        # Markdown answer
-print(data["total_sources"])  # Number of source chunks used</div>
+print(data["total_sources"])  # Number of source chunks used
+
+# Human-readable Markdown response
+resp = requests.post("http://localhost:8090/api/ask", json={
+    "query": "How does the pricing engine calculate nightly rates?",
+    "top_k": 10,
+    "format": "md"
+})
+print(resp.text)  # Full Markdown document with answer + sources</div>
       </div>
 
     </div>
