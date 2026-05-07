@@ -456,7 +456,6 @@ def api_ask(req: AskRequest):
         duration = (datetime.now() - start).total_seconds() * 1000
         _api_log("POST", "/api/ask", 500, duration, f"ERROR: {e}")
         log.exception(f"/api/ask failed: {e}")
-        from fastapi.responses import PlainTextResponse
         return PlainTextResponse(f"Internal error: {e}", status_code=500)
 
 
@@ -691,6 +690,36 @@ def dashboard():
   .param-table td:first-child { color: #fbbf24; font-family: monospace; white-space: nowrap; }
   .param-table td:last-child { color: #9ca3af; }
   .response-hint { color: #6b7280; font-size: 11px; font-style: italic; margin-top: 4px; }
+
+  /* Query form */
+  .query-form { padding: 16px 20px; }
+  .query-row { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 12px; }
+  .query-input { flex: 1; background: #0f1117; border: 1px solid #2a2d3a; border-radius: 8px; padding: 10px 14px; color: #e0e0e0; font-size: 14px; font-family: 'Segoe UI', sans-serif; outline: none; transition: border-color .2s; }
+  .query-input:focus { border-color: #2563eb; }
+  .query-input::placeholder { color: #4b5563; }
+  .btn-send { background: #2563eb; color: #fff; border: none; padding: 10px 22px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: background .15s; }
+  .btn-send:hover { background: #3b82f6; }
+  .btn-send:disabled { background: #1e3a5f; color: #6b7280; cursor: not-allowed; }
+  .query-opts { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .opt-group { display: flex; align-items: center; gap: 8px; }
+  .opt-group label { font-size: 12px; color: #9ca3af; cursor: pointer; display: flex; align-items: center; gap: 5px; }
+  .opt-group select, .opt-group input[type=number] { background: #0f1117; border: 1px solid #2a2d3a; border-radius: 6px; color: #e0e0e0; padding: 4px 8px; font-size: 12px; outline: none; }
+  .opt-group select:focus, .opt-group input[type=number]:focus { border-color: #2563eb; }
+  .radio-pill { display: none; }
+  .radio-pill + span { display: inline-block; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; border: 1px solid #2a2d3a; color: #6b7280; transition: all .15s; }
+  .radio-pill:checked + span { background: #1e3a5f; border-color: #2563eb; color: #60a5fa; }
+  .checkbox-pill { display: none; }
+  .checkbox-pill + span { display: inline-block; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; border: 1px solid #2a2d3a; color: #6b7280; transition: all .15s; cursor: pointer; }
+  .checkbox-pill:checked + span { background: #14532d; border-color: #22c55e; color: #4ade80; }
+  .result-wrap { position: relative; }
+  .result-area { width: 100%; min-height: 160px; max-height: 500px; background: #0f1117; border: 1px solid #2a2d3a; border-radius: 8px; padding: 12px 14px; color: #e0e0e0; font-family: 'Menlo','Consolas',monospace; font-size: 12px; line-height: 1.6; resize: vertical; outline: none; }
+  .result-area:focus { border-color: #2563eb; }
+  .result-area::placeholder { color: #4b5563; }
+  .btn-copy-result { position: absolute; top: 8px; right: 8px; background: #2a2d3a; color: #9ca3af; border: none; padding: 5px 12px; border-radius: 6px; font-size: 11px; cursor: pointer; transition: all .15s; }
+  .btn-copy-result:hover { background: #3b4252; color: #fff; }
+  .result-meta { display: flex; gap: 16px; margin-top: 6px; font-size: 11px; color: #6b7280; }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -721,6 +750,33 @@ def dashboard():
   <div class="card">
     <div class="card-label">Index Chunks</div>
     <div class="card-value blue" id="rag-chunks">—</div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-header">🔍 Query Knowledge Base</div>
+  <div class="query-form">
+    <div class="query-row">
+      <input class="query-input" id="q-input" type="text" placeholder="Ask a question or search the knowledge base…" onkeydown="if(event.key==='Enter')sendQuery()">
+      <button class="btn-send" id="btn-send" onclick="sendQuery()">Send</button>
+    </div>
+    <div class="query-opts">
+      <div class="opt-group">
+        <label><input type="radio" name="q-endpoint" class="radio-pill" value="ask" checked><span>Ask (LLM)</span></label>
+        <label><input type="radio" name="q-endpoint" class="radio-pill" value="query"><span>Search</span></label>
+      </div>
+      <div class="opt-group">
+        <label><input type="checkbox" id="q-format-md" class="checkbox-pill"><span>Markdown</span></label>
+      </div>
+      <div class="opt-group">
+        <label>top_k <input type="number" id="q-topk" value="10" min="1" max="50" style="width:60px"></label>
+      </div>
+    </div>
+    <div class="result-wrap">
+      <textarea class="result-area" id="q-result" readonly placeholder="Results will appear here…"></textarea>
+      <button class="btn-copy-result" id="btn-copy-result" onclick="copyResult()">📋 Copy</button>
+    </div>
+    <div class="result-meta" id="q-meta"></div>
   </div>
 </div>
 
@@ -861,12 +917,17 @@ function toggleModal(show) {
   document.getElementById('help-modal').classList.toggle('active', show);
 }
 
+function _copyText(text, btn, okLabel, origLabel) {
+  // Fallback that works in non-HTTPS (IP address) contexts
+  try { navigator.clipboard.writeText(text).then(() => { btn.textContent = okLabel; setTimeout(() => btn.textContent = origLabel, 1500); }); }
+  catch(e) { const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); btn.textContent = okLabel; setTimeout(() => btn.textContent = origLabel, 1500); }
+}
+
 function copyCode(btn) {
-  const code = btn.parentElement.textContent.replace('Copy','').trim();
-  navigator.clipboard.writeText(code).then(() => {
-    btn.textContent = '✓';
-    setTimeout(() => btn.textContent = 'Copy', 1500);
-  });
+  const clone = btn.parentElement.cloneNode(true);
+  clone.querySelector('.btn-copy')?.remove();
+  const code = clone.textContent.trim();
+  _copyText(code, btn, '✓', 'Copy');
 }
 
 function pipelineLogClass(line) {
@@ -977,6 +1038,76 @@ async function refresh() {
     document.getElementById('log-updated').textContent = new Date().toLocaleTimeString();
 
   } catch(e) { console.error(e); }
+}
+
+async function sendQuery() {
+  const input = document.getElementById('q-input');
+  const btn = document.getElementById('btn-send');
+  const resultEl = document.getElementById('q-result');
+  const metaEl = document.getElementById('q-meta');
+  const query = input.value.trim();
+  if (!query) return;
+
+  const endpoint = document.querySelector('input[name="q-endpoint"]:checked').value;
+  const asMd = document.getElementById('q-format-md').checked;
+  const topK = parseInt(document.getElementById('q-topk').value) || 10;
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Sending…';
+  resultEl.value = '';
+  metaEl.textContent = '';
+
+  const t0 = performance.now();
+  try {
+    let resp;
+    if (endpoint === 'ask') {
+      resp = await fetch('/api/ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, top_k: topK, format: asMd ? 'md' : null })
+      });
+    } else {
+      resp = await fetch('/api/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, top_k: topK, format: asMd ? 'md' : null })
+      });
+    }
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+
+    if (!resp.ok) {
+      resultEl.value = 'Error ' + resp.status + ': ' + await resp.text();
+      metaEl.textContent = `Failed in ${elapsed}s`;
+      return;
+    }
+
+    const ct = resp.headers.get('content-type') || '';
+    if (ct.includes('text/') || asMd) {
+      const text = await resp.text();
+      resultEl.value = text;
+      metaEl.textContent = `${endpoint.toUpperCase()} · ${elapsed}s · Markdown response`;
+    } else {
+      const data = await resp.json();
+      resultEl.value = JSON.stringify(data, null, 2);
+      const info = endpoint === 'ask'
+        ? `model: ${data.model} · sources: ${data.total_sources}`
+        : `results: ${data.total_results}`;
+      metaEl.textContent = `${endpoint.toUpperCase()} · ${elapsed}s · ${info}`;
+    }
+  } catch(e) {
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+    resultEl.value = 'Request failed: ' + e.message;
+    metaEl.textContent = `Failed in ${elapsed}s`;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = 'Send';
+  }
+}
+
+function copyResult() {
+  const text = document.getElementById('q-result').value;
+  if (!text) return;
+  _copyText(text, document.getElementById('btn-copy-result'), '✓ Copied', '📋 Copy');
 }
 
 refresh();
