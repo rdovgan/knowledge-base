@@ -11,8 +11,10 @@ Usage:
   python3 run_rag.py markdown                 # Step 3
   python3 run_rag.py enrich                   # Step 4
   python3 run_rag.py enrich --limit 10        # First 10 domains only
+  python3 run_rag.py flows                    # Step 4.5: cross-domain flow docs
+  python3 run_rag.py flows --limit 3          # Generate first 3 flows only
   python3 run_rag.py index                    # Step 5 (resume-safe)
-  python3 run_rag.py all                      # Steps 1-5
+  python3 run_rag.py all                      # Steps 1-6
   python3 run_rag.py query "how does booking work?"  # Query RAG
   python3 run_rag.py status                   # Show current state
 
@@ -274,6 +276,30 @@ def step_markdown(force=False):
 
 # ── Step 4: Enrich ───────────────────────────────────────────────
 
+def step_flows(limit=0, delay=2.0):
+    """Generate cross-domain flow documents."""
+    from rag_pipeline.flow_generator import generate_flows
+
+    if not LLM_API_KEY:
+        log.error("ZAI_API_KEY not set. Check .env file.")
+        sys.exit(1)
+
+    with open(DOMAINS_FILE) as f:
+        domains = json.load(f)
+
+    stats = generate_flows(
+        domains=domains,
+        output_dir=str(WIKI_DIR),
+        api_key=LLM_API_KEY,
+        base_url=LLM_BASE_URL,
+        model=LLM_MODEL,
+        fallback_model=LLM_FALLBACK,
+        delay=delay,
+        limit=limit,
+    )
+    log.info(f"═══ Flow generation complete: {stats} ═══")
+
+
 def step_enrich(limit=0, delay=1.0):
     from rag_pipeline.enricher import enrich_all_domains
 
@@ -416,7 +442,7 @@ def cmd_status():
 def main():
     parser = argparse.ArgumentParser(description="RAG Pipeline Runner")
     parser.add_argument('command', choices=[
-        'parse', 'group', 'markdown', 'enrich', 'index', 'all', 'query', 'status'
+        'parse', 'group', 'markdown', 'enrich', 'flows', 'index', 'all', 'query', 'status'
     ])
     parser.add_argument('query_text', nargs='*', help='Query text (for query command)')
     parser.add_argument('--module', '-m', help='Module name(s), comma-separated')
@@ -461,6 +487,9 @@ def main():
         elif args.command == 'enrich':
             step_enrich(limit=args.limit, delay=args.delay)
 
+        elif args.command == 'flows':
+            step_flows(limit=args.limit, delay=args.delay)
+
         elif args.command == 'index':
             step_index()
 
@@ -469,6 +498,7 @@ def main():
             step_group(force=args.force)
             step_markdown(force=args.force)
             step_enrich(limit=args.limit, delay=args.delay)
+            step_flows(limit=args.limit, delay=args.delay)
             step_index()
 
         log.info(f"═══════════════════════════════════════════")
