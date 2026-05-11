@@ -13,7 +13,9 @@ Usage:
   python3 run_rag.py enrich --limit 10        # First 10 domains only
   python3 run_rag.py flows                    # Step 4.5: cross-domain flow docs
   python3 run_rag.py flows --limit 3          # Generate first 3 flows only
-  python3 run_rag.py index                    # Step 5 (resume-safe)
+  python3 run_rag.py index                    # Step 5 (incremental — only new files)
+  python3 run_rag.py index --force            # Full reindex (CPU-heavy!)
+  python3 run_rag.py index --force            # Full reindex (CPU-heavy!)
   python3 run_rag.py all                      # Steps 1-6
   python3 run_rag.py query "how does booking work?"  # Query RAG
   python3 run_rag.py status                   # Show current state
@@ -328,7 +330,7 @@ def step_enrich(limit=0, delay=1.0):
 
 # ── Step 5: Index (with retry + resume) ──────────────────────────
 
-def step_index():
+def step_index(force: bool = False, only_files: list = None):
     from rag_pipeline.indexer import build_vectorstore
 
     if not WIKI_DIR.is_dir():
@@ -344,6 +346,9 @@ def step_index():
                 wiki_dir=str(WIKI_DIR),
                 store_dir=str(VECTORSTORE_DIR),
                 collection_name="wiki_java",
+                incremental=not force,
+                cpu_limit=1,
+                only_files=only_files,
             )
             log.info(f"═══ Index complete: {stats} ═══")
             return
@@ -491,7 +496,7 @@ def main():
             step_flows(limit=args.limit, delay=args.delay)
 
         elif args.command == 'index':
-            step_index()
+            step_index(force=args.force)
 
         elif args.command == 'all':
             step_parse(force=args.force)
@@ -499,7 +504,7 @@ def main():
             step_markdown(force=args.force)
             step_enrich(limit=args.limit, delay=args.delay)
             step_flows(limit=args.limit, delay=args.delay)
-            step_index()
+            step_index(force=args.force)
 
         log.info(f"═══════════════════════════════════════════")
         log.info(f"  Done. {datetime.now().isoformat()}")

@@ -77,16 +77,66 @@ def chunk_markdown(content: str, file_path: str, max_chunk_size: int = 1500) -> 
     return chunks
 
 
+def _get_indexed_files(collection) -> set:
+    """Extract set of source_file values already in the collection."""
+    indexed = set()
+    try:
+        # ChromaDB get() with include=["metadatas"] to scan source_file values
+        batch_size = 5000
+        total = collection.count()
+        offset = 0
+        while offset < total:
+            result = collection.get(
+                ids=[f"chunk_{i}" for i in range(offset, min(offset + batch_size, total))],
+                include=["metadatas"],
+            )
+            for meta in result.get('metadatas', []):
+                sf = meta.get('source_file', '') if meta else ''
+                if sf:
+                    indexed.add(sf)
+            offset += batch_size
+            if offset % 50000 == 0:
+                log.info(f"  Scanned {offset}/{total} existing chunks...")
+    except Exception as e:
+        log.warning(f"Could not scan existing indexed files: {e}")
+    return indexed
+
+
 def build_vectorstore(
     wiki_dir: str,
     store_dir: str,
     collection_name: str = "wiki_java",
     embedding_model: str = "all-MiniLM-L6-v2",
     batch_size: int = 500,
+    incremental: bool = True,
+    cpu_limit: int = 1,
+    only_files: list = None,
 ):
-    """Index all Markdown files. Resumes from where it stopped."""
+    """
+    Index Markdown files into ChromaDB.
+
+    Modes:
+      incremental=True  — only index NEW/CHANGED files (fast, low CPU)
+      incremental=False — full reindex (use --force-index flag)
+      only_files=[...]  — only index specific files
+
+    cpu_limit: cap number of threads used for embedding.
+    """
     import chromadb
     from sentence_transformers import SentenceTransformer
+
+    # ── CPU throttling ─────────────────────────────────────────
+    if cpu_limit > 0:
+        try:
+            os.sched_setaffinity(0, list(range(min(cpu_limit, os.cpu_count() or 1))))
+        except AttributeError:
+            pass  # macOS lacks sched_setaffinity
+        import torch
+        if torch.cuda.is_available():
+            pass  # GPU — let it be
+        else:
+            torch.set_num_threads(cpu_limit)
+            log.info(f"CPU limited to {cpu_limit} thread(s)")
 
     log.info(f"Loading embedding model: {embedding_model}")
     encoder = SentenceTransformer(embedding_model)
@@ -99,17 +149,45 @@ def build_vectorstore(
     existing_count = collection.count()
     log.info(f"Collection '{collection_name}': {existing_count} existing chunks")
 
-    # Find all Markdown files
+    # ── Find Markdown files ─────────────────────────────────────
     md_files = []
-    for root, dirs, files in os.walk(wiki_dir):
-        dirs[:] = [d for d in dirs if not d.startswith('.')]
-        for f in files:
-            if f.endswith('.md'):
-                md_files.append(os.path.join(root, f))
+    if only_files:
+        for f in only_files:
+            full = os.path.join(wiki_dir, f) if not os.path.isabs(f) else f
+            if os.path.exists(full):
+                md_files.append(full)
+        log.info(f"Targeting {len(md_files)} specific files")
+    else:
+        for root, dirs, files in os.walk(wiki_dir):
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for f in files:
+                if f.endswith('.md'):
+                    md_files.append(os.path.join(root, f))
+        log.info(f"Found {len(md_files)} Markdown files")
 
-    log.info(f"Found {len(md_files)} Markdown files to index")
+    # ── Incremental: find what's already indexed ────────────────
+    if incremental and not only_files:
+        log.info("Scanning existing index for incremental update...")
+        indexed_files = _get_indexed_files(collection)
+        log.info(f"Found {len(indexed_files)} unique files already indexed")
 
-    # Chunk all files
+        # Filter to only new/changed files
+        new_files = []
+        for fp in md_files:
+            rel = fp.replace(wiki_dir, '').lstrip('/')
+            if rel not in indexed_files:
+                new_files.append(fp)
+        log.info(f"New/changed files to index: {len(new_files)} (skipping {len(md_files) - len(new_files)} existing)")
+        md_files = new_files
+
+        if not md_files:
+            log.info("✅ Nothing new to index")
+            return {"collection": collection_name, "total_chunks": existing_count, "indexed_now": 0}
+    elif only_files:
+        # For specific files, always index them (upsert)
+        pass
+
+    # ── Chunk files ─────────────────────────────────────────────
     all_chunks = []
     for file_path in md_files:
         try:
@@ -121,25 +199,27 @@ def build_vectorstore(
         except Exception as e:
             log.warning(f"Failed to read {file_path}: {e}")
 
-    log.info(f"Total chunks: {len(all_chunks)}")
+    log.info(f"Total new chunks: {len(all_chunks)}")
 
-    # Resume: skip already indexed
-    start_offset = existing_count
-    if start_offset >= len(all_chunks):
-        log.info(f"✅ Already fully indexed ({existing_count} chunks)")
-        return {"collection": collection_name, "total_chunks": existing_count, "total_files": len(md_files)}
+    if not all_chunks:
+        log.info("✅ No chunks to index")
+        return {"collection": collection_name, "total_chunks": existing_count, "indexed_now": 0}
 
-    remaining = len(all_chunks) - start_offset
-    total_batches = (remaining + batch_size - 1) // batch_size
-    log.info(f"Resuming from chunk {start_offset}, {remaining} remaining ({total_batches} batches)")
+    # ── Batch embed and upsert ──────────────────────────────────
+    total_batches = (len(all_chunks) + batch_size - 1) // batch_size
+    log.info(f"Embedding {len(all_chunks)} chunks in {total_batches} batches (batch_size={batch_size})")
 
-    # Batch embed and upsert
+    # Use stable IDs based on source file + chunk index to allow upsert
+    for idx, chunk in enumerate(all_chunks):
+        src = chunk['metadata'].get('source_file', '').replace('/', '_').replace('.', '_')
+        chunk['_id'] = f"inc_{src}_{idx}"
+
     done = 0
-    for i in range(start_offset, len(all_chunks), batch_size):
+    for i in range(0, len(all_chunks), batch_size):
         batch = all_chunks[i:i + batch_size]
         texts = [c['text'] for c in batch]
         metas = [c['metadata'] for c in batch]
-        ids = [f"chunk_{i + j}" for j in range(len(batch))]
+        ids = [c['_id'] for c in batch]
 
         done += 1
         log.info(f"Embedding batch {done}/{total_batches} ({len(batch)} chunks)")
@@ -154,8 +234,8 @@ def build_vectorstore(
         )
 
     total = collection.count()
-    log.info(f"✅ Indexed {total} chunks in collection '{collection_name}'")
-    return {"collection": collection_name, "total_chunks": total, "total_files": len(md_files)}
+    log.info(f"✅ Indexed {len(all_chunks)} new chunks. Collection total: {total}")
+    return {"collection": collection_name, "total_chunks": total, "indexed_now": len(all_chunks)}
 
 
 def query_rag(
