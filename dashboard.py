@@ -697,25 +697,23 @@ def dashboard():
   .section-header { padding: 14px 20px; border-bottom: 1px solid #2a2d3a; font-weight: 600; font-size: 14px; display: flex; justify-content: space-between; align-items: center; }
   .section-body { padding: 0; }
 
-  .module-row { border-bottom: 1px solid #1e2130; }
+  .module-row { display: flex; align-items: center; gap: 8px; padding: 4px 12px; font-size: 12px; border-bottom: 1px solid #1e213066; }
   .module-row:last-child { border-bottom: none; }
-  .module-header { padding: 12px 20px; transition: background .15s; cursor: pointer; display: flex; align-items: center; gap: 12px; }
-  .module-header:hover { background: #1e2130; }
-  .module-name { font-weight: 500; font-size: 14px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .badge { min-width: 72px; text-align: center; flex-shrink: 0; }
-  .module-chevron { transition: transform 0.2s; font-size: 12px; color: #6b7280; flex-shrink: 0; width: 16px; }
-  .module-chevron.expanded { transform: rotate(90deg); }
-  .module-content { padding: 0 20px 12px 20px; display: none; }
-  .module-content.expanded { display: block; }
-  .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+  .module-row:hover { background: #1e2130; }
+  .module-name { font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { min-width: 56px; text-align: center; flex-shrink: 0; }
+  .module-chevron { display: none; }
+  .module-content { display: none; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 10px; font-weight: 600; }
   .badge-done { background: #14532d; color: #4ade80; }
   .badge-generating { background: #1e3a5f; color: #60a5fa; animation: pulse 2s infinite; }
   .badge-pending { background: #1f2937; color: #9ca3af; }
   .badge-failed { background: #450a0a; color: #f87171; }
-  .module-stats { display: flex; gap: 16px; font-size: 12px; color: #9ca3af; margin-bottom: 8px; }
-  .module-stats .done { color: #4ade80; }
-  .module-stats .fail { color: #f87171; }
-  .module-stats .pend { color: #fbbf24; }
+  .module-bar { width: 50px; height: 3px; background: #2a2d3a; border-radius: 2px; overflow: hidden; flex-shrink: 0; }
+  .module-bar-fill { height: 100%; border-radius: 2px; }
+  .module-pct { color: #6b7280; width: 30px; text-align: right; flex-shrink: 0; font-size: 11px; }
+  .module-counts { color: #6b7280; font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+  .collapsed { display: none !important; }
   .progress-bar { height: 6px; background: #2a2d3a; border-radius: 3px; overflow: hidden; }
   .progress-fill { height: 100%; border-radius: 3px; transition: width .5s; }
   .pages-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px; margin-top: 8px; }
@@ -837,8 +835,8 @@ def dashboard():
         <label><input type="radio" name="q-endpoint" class="radio-pill" value="query"><span>Search</span></label>
       </div>
       <div class="opt-group">
-        <label><input type="radio" name="q-format" class="radio-pill radio-green" value="" checked><span>JSON</span></label>
-        <label><input type="radio" name="q-format" class="radio-pill radio-green" value="md"><span>Markdown</span></label>
+        <label><input type="radio" name="q-format" class="radio-pill radio-green" value=""><span>JSON</span></label>
+        <label><input type="radio" name="q-format" class="radio-pill radio-green" value="md" checked><span>Markdown</span></label>
         <label><input type="radio" name="q-format" class="radio-pill radio-green" value="human"><span>Human</span></label>
       </div>
       <div class="opt-group">
@@ -851,11 +849,6 @@ def dashboard():
     </div>
     <div class="result-meta" id="q-meta"></div>
   </div>
-</div>
-
-<div class="section">
-  <div class="section-header">📦 Modules</div>
-  <div class="section-body" id="modules-list"></div>
 </div>
 
 <div class="section">
@@ -877,6 +870,14 @@ def dashboard():
     <span style="font-size:11px;color:#6b7280" id="log-updated"></span>
   </div>
   <div class="log-body" id="logs-body"></div>
+</div>
+
+<div class="section">
+  <div class="section-header" onclick="document.getElementById('modules-list').classList.toggle('collapsed')" style="cursor:pointer">
+    <span>📦 Modules</span>
+    <span style="font-size:11px;color:#6b7280" id="modules-summary"></span>
+  </div>
+  <div class="section-body collapsed" id="modules-list" style="max-height:250px;overflow-y:auto"></div>
 </div>
 
 <!-- Help Modal -->
@@ -1053,8 +1054,10 @@ async function refresh() {
       document.getElementById('rag-chunks').textContent = '—';
     }
 
-    // Modules
+    // Modules (compact)
     const list = document.getElementById('modules-list');
+    const doneCount = d.modules.filter(m => m.status === 'done').length;
+    document.getElementById('modules-summary').textContent = `${doneCount}/${d.modules.length} done`;
     list.innerHTML = d.modules.map(m => {
       const pct = m.total ? Math.round(m.completed / m.total * 100) : 0;
       const color = m.status === 'done' ? '#4ade80' :
@@ -1062,26 +1065,11 @@ async function refresh() {
                     m.status === 'failed' ? '#f87171' : '#374151';
       const current = m.current_page ? ` → ${m.current_page}` : '';
       return `<div class="module-row">
-        <div class="module-header" onclick="toggleModule(this)">
-          <span class="module-name">${m.name}${current}</span>
-          <span class="badge badge-${m.status}">${m.status}</span>
-          <span class="module-chevron">▶</span>
-        </div>
-        <div class="module-content">
-          <div class="module-stats">
-            <span class="done">${m.completed} done</span>
-            <span class="fail">${m.failed} failed</span>
-            <span class="pend">${m.pending} pending</span>
-            <span>${m.total} total</span>
-          </div>
-          <div class="progress-bar"><div class="progress-fill" style="width:${pct}%;background:${color}"></div></div>
-          ${m.failed_pages.length > 0 || m.generating > 0 ? `
-          <div class="pages-grid">
-            ${m.generating > 0 && m.current_page ? `<div class="page-chip generating">⏳ ${m.current_page}</div>` : ''}
-            ${m.failed_pages.slice(0, 10).map(p => `<div class="page-chip failed">✗ ${p}</div>`).join('')}
-            ${m.failed_pages.length > 10 ? `<div class="page-chip failed">+${m.failed_pages.length - 10} more</div>` : ''}
-          </div>` : ''}
-        </div>
+        <span class="module-name">${m.name}${current}</span>
+        <span class="module-counts">${m.completed}/${m.total}${m.failed ? ' <span style=color:#f87171>' + m.failed + '✗</span>' : ''}</span>
+        <div class="module-bar"><div class="module-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+        <span class="module-pct">${pct}%</span>
+        <span class="badge badge-${m.status}">${m.status}</span>
       </div>`;
     }).join('');
 
