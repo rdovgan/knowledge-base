@@ -7,6 +7,7 @@ Supports resume: re-running continues from where it stopped.
 import os
 import re
 import logging
+import yaml
 from typing import List, Dict, Optional
 from datetime import datetime
 
@@ -21,10 +22,15 @@ def chunk_markdown(content: str, file_path: str, max_chunk_size: int = 1500) -> 
         end = content.find('---', 3)
         if end > 0:
             fm = content[3:end].strip()
-            for line in fm.split('\n'):
-                if ':' in line:
-                    key, _, val = line.partition(':')
-                    metadata[key.strip()] = val.strip()
+            try:
+                metadata = yaml.safe_load(fm) or {}
+                metadata = {k: str(v) for k, v in metadata.items()}
+            except yaml.YAMLError:
+                # Fallback to simple line-by-line parsing
+                for line in fm.split('\n'):
+                    if ':' in line:
+                        key, _, val = line.partition(':')
+                        metadata[key.strip()] = val.strip()
             body = content[end + 3:].strip()
 
     sections = []
