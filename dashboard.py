@@ -10,6 +10,9 @@ Endpoints:
   POST /api/ask        — RAG: search + LLM answer (format=md for Markdown)
   GET  /api/ask        — Same via GET (?q=...&format=md)
   GET  /api/status-rag — RAG index stats
+  GET  /api/history    — Paginated request history (DB-backed)
+  GET  /api/history/{id} — Full request/response detail
+  GET  /api/stats      — Aggregated API usage stats
 """
 
 import json
@@ -17,42 +20,173 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from fastapi import FastAPI, Query as QueryParam
+from fastapi import FastAPI, Query as QueryParam, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 import logging
 import uvicorn
 import subprocess
+import db as db_module
 
 app = FastAPI(title="CAKB — RAG Pipeline & Query API")
 
 log = logging.getLogger("cakb.api")
 
-# ── In-memory API request log ───────────────────────────────────
-import threading
-from collections import deque
-from datetime import datetime
+# ── DB-backed API request logging via middleware ────────────────
 
-_api_log_lock = threading.Lock()
-_api_logs = deque(maxlen=200)  # keep last 200 entries
+# Paths to skip from logging
+_SKIP_LOG_PREFIXES = ("/api/status", "/api/logs", "/api/stats", "/api/history", "/favicon.ico")
 
-def _api_log(method: str, path: str, status: int, duration_ms: float, detail: str = ""):
-    if path in ("/api/status", "/api/status-rag"):
-        return
-    with _api_log_lock:
-        _api_logs.append({
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "method": method,
-            "path": path,
-            "status": status,
-            "duration_ms": round(duration_ms, 0),
-            "detail": detail,
-        })
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Middleware that logs all API requests to SQLite."""
+    start = datetime.now()
+
+    # Read request body for POST endpoints
+    request_body = {}
+    if request.method == "POST":
+        try:
+            body_bytes = await request.body()
+            if body_bytes:
+                request_body = json.loads(body_bytes)
+        except Exception:
+            request_body = {}
+
+    # Call the actual endpoint
+    response = await call_next(request)
+
+    # Capture response body from streaming response
+    response_body = ""
+    try:
+        body_parts = []
+        async for chunk in response.body_iterator:
+            if isinstance(chunk, bytes):
+                body_parts.append(chunk)
+            elif isinstance(chunk, str):
+                body_parts.append(chunk.encode("utf-8"))
+            else:
+                body_parts.append(str(chunk).encode("utf-8"))
+        raw_body = b"".join(body_parts)
+        response_body = raw_body.decode("utf-8", errors="replace")
+    except Exception:
+        raw_body = b""
+        response_body = ""
+
+    # Build a clean response to send back to client
+    # Avoid copying hop-by-hop headers that cause issues
+    skip_headers = {"transfer-encoding", "content-encoding", "content-length"}
+    clean_headers = {
+        k: v for k, v in response.headers.items()
+        if k.lower() not in skip_headers
+    }
+
+    new_response = Response(
+        content=raw_body,
+        status_code=response.status_code,
+        headers=clean_headers,
+        media_type=response.media_type,
+    )
+
+    duration_ms = (datetime.now() - start).total_seconds() * 1000
+    path = request.url.path
+
+    # Only log real API calls (skip status polling, logs, etc.)
+    if path.startswith("/api/") and not any(path.startswith(p) for p in _SKIP_LOG_PREFIXES):
+        try:
+            query_text = request_body.get("query", "") or dict(request.query_params).get("q", "")
+            fmt = request_body.get("format", "") or dict(request.query_params).get("format", "")
+            model_used = ""
+            sources_count = 0
+            error_msg = ""
+
+            # Try to extract model/sources from JSON response
+            if response_body:
+                try:
+                    resp_json = json.loads(response_body)
+                    model_used = resp_json.get("model", "")
+                    sources_count = resp_json.get("total_sources", resp_json.get("total_results", 0))
+                except (json.JSONDecodeError, TypeError):
+                    # Try to extract from Markdown response
+                    import re
+                    m = re.search(r'\*\*Model:\*\*\s*(.+)', response_body)
+                    if m:
+                        model_used = m.group(1).strip()
+                    m = re.search(r'\*\*Sources used:\*\*\s*(\d+)', response_body)
+                    if m:
+                        sources_count = int(m.group(1))
+                    m = re.search(r'\*\*Results:\*\*\s*(\d+)', response_body)
+                    if m:
+                        sources_count = int(m.group(1))
+
+            if response.status_code >= 400:
+                error_msg = response_body[:1000] if response_body else ""
+
+            # Truncate large response bodies for storage
+            stored_body = response_body[:50000] if response_body else ""
+
+            db_module.insert_request(
+                method=request.method,
+                endpoint=path,
+                query_text=query_text,
+                status_code=response.status_code,
+                duration_ms=duration_ms,
+                request_params=request_body,
+                response_body=stored_body,
+                response_format=fmt,
+                model_used=model_used,
+                sources_count=sources_count,
+                error=error_msg,
+            )
+        except Exception as e:
+            log.warning(f"Failed to log request to DB: {e}")
+
+    return new_response
+
 
 @app.get("/api/logs")
 def api_get_logs():
-    with _api_log_lock:
-        return list(_api_logs)
+    """Recent API request log (DB-backed, backward compatible)."""
+    return db_module.get_recent_logs(200)
+
+
+@app.get("/api/stats")
+def api_stats():
+    """Aggregated API usage stats."""
+    return db_module.get_stats()
+
+
+@app.get("/api/history")
+def api_history(
+    page: int = QueryParam(1, ge=1),
+    per_page: int = QueryParam(20, ge=1, le=100),
+    endpoint: Optional[str] = None,
+    q: Optional[str] = None,
+    method: Optional[str] = None,
+    status: Optional[int] = None,
+):
+    """Paginated request history from DB.
+
+    Example:
+        curl 'http://localhost:8090/api/history?page=1&per_page=10&endpoint=/api/ask'
+    """
+    return db_module.get_history(
+        page=page, per_page=per_page,
+        endpoint=endpoint, q=q, method=method, status=status,
+    )
+
+
+@app.get("/api/history/{request_id}")
+def api_history_detail(request_id: int):
+    """Full request/response detail.
+
+    Example:
+        curl http://localhost:8090/api/history/42
+    """
+    detail = db_module.get_request_detail(request_id)
+    if not detail:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return detail
 
 PROJECT_ROOT = Path("/home/r.dovgan/cakb")
 RAG_DIR = PROJECT_ROOT / "rag"          # wiki markdown (submodule)
@@ -124,7 +258,6 @@ def api_query(req: QueryRequest):
         top_k=req.top_k,
         filter_metadata=req.filter,
     )
-    _api_log("POST", "/api/query", 200, 0, req.query[:80])
     resp = QueryResponse(
         query=req.query,
         total_results=len(results),
@@ -152,7 +285,6 @@ def api_query_get(q: str = QueryParam(..., alias="q"), top_k: int = 5, format: O
         collection_name="wiki_java",
         top_k=top_k,
     )
-    _api_log("GET", "/api/query", 200, 0, q[:80])
     resp = QueryResponse(query=q, total_results=len(results), results=results)
     if format == "md":
         return PlainTextResponse(_format_query_md(resp), media_type="text/markdown")
@@ -513,16 +645,12 @@ def api_ask(req: AskRequest):
     start = datetime.now()
     try:
         result = _do_ask(req.query, req.top_k, req.filter, req.model)
-        duration = (datetime.now() - start).total_seconds() * 1000
-        _api_log("POST", "/api/ask", 200, duration, req.query[:80])
         if req.format == "md":
             return PlainTextResponse(_format_ask_md(result), media_type="text/markdown")
         if req.format == "human":
             return PlainTextResponse(_humanize_ask(result), media_type="text/markdown")
         return result
     except Exception as e:
-        duration = (datetime.now() - start).total_seconds() * 1000
-        _api_log("POST", "/api/ask", 500, duration, f"ERROR: {e}")
         log.exception(f"/api/ask failed: {e}")
         return PlainTextResponse(f"Internal error: {e}", status_code=500)
 
@@ -536,8 +664,6 @@ def api_ask_get(q: str = QueryParam(..., alias="q"), top_k: int = 10, format: Op
     """
     start = datetime.now()
     result = _do_ask(q, top_k, None)
-    duration = (datetime.now() - start).total_seconds() * 1000
-    _api_log("GET", "/api/ask", 200, duration, q[:80])
     if format == "md":
         return PlainTextResponse(_format_ask_md(result), media_type="text/markdown")
     if format == "human":
@@ -598,8 +724,6 @@ def api_status_rag():
         result = {"indexed_chunks": coll.count(), "collection": "wiki_java"}
     except Exception as e:
         result = {"error": str(e)}
-    duration = (datetime.now() - start).total_seconds() * 1000
-    _api_log("GET", "/api/status-rag", 200, duration)
     return result
 
 
@@ -650,8 +774,6 @@ def api_status():
         "modules": modules_data,
         "logs": get_last_logs(30),
     }
-    duration = (datetime.now() - start).total_seconds() * 1000
-    _api_log("GET", "/api/status", 200, duration)
     return result
 
 
@@ -660,9 +782,10 @@ def api_reset():
     """Reset pipeline state."""
     if STATE_FILE.exists():
         STATE_FILE.unlink()
-    _api_log("GET", "/api/reset", 200, 0)
     return {"status": "reset"}
 
+
+@app.get("/", response_class=HTMLResponse)
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -680,6 +803,14 @@ def dashboard():
   .header-row { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
   .btn-help { background: #2563eb; color: #fff; border: none; padding: 5px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; }
   .btn-help:hover { background: #3b82f6; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 0; margin-bottom: 24px; border-bottom: 1px solid #2a2d3a; }
+  .tab { padding: 10px 20px; cursor: pointer; font-size: 14px; font-weight: 600; color: #6b7280; border-bottom: 2px solid transparent; transition: all .15s; }
+  .tab:hover { color: #e0e0e0; }
+  .tab.active { color: #60a5fa; border-bottom-color: #2563eb; }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
 
   .grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr; gap: 16px; margin-bottom: 24px; }
   .card { background: #1a1d27; border-radius: 12px; padding: 20px; border: 1px solid #2a2d3a; }
@@ -701,9 +832,6 @@ def dashboard():
   .module-row:last-child { border-bottom: none; }
   .module-row:hover { background: #1e2130; }
   .module-name { font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .badge { min-width: 56px; text-align: center; flex-shrink: 0; }
-  .module-chevron { display: none; }
-  .module-content { display: none; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 10px; font-weight: 600; }
   .badge-done { background: #14532d; color: #4ade80; }
   .badge-generating { background: #1e3a5f; color: #60a5fa; animation: pulse 2s infinite; }
@@ -714,12 +842,6 @@ def dashboard():
   .module-pct { color: #6b7280; width: 30px; text-align: right; flex-shrink: 0; font-size: 11px; }
   .module-counts { color: #6b7280; font-size: 11px; white-space: nowrap; flex-shrink: 0; }
   .collapsed { display: none !important; }
-  .progress-bar { height: 6px; background: #2a2d3a; border-radius: 3px; overflow: hidden; }
-  .progress-fill { height: 100%; border-radius: 3px; transition: width .5s; }
-  .pages-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px; margin-top: 8px; }
-  .page-chip { font-size: 11px; padding: 4px 8px; border-radius: 6px; background: #2a2d3a; }
-  .page-chip.failed { background: #450a0a; color: #f87171; }
-  .page-chip.generating { background: #1e3a5f; color: #60a5fa; animation: pulse 1s infinite; }
 
   .log-body { padding: 12px 20px; font-family: 'Menlo', 'Consolas', monospace; font-size: 12px; max-height: 300px; overflow-y: auto; }
   .log-line { padding: 2px 0; color: #9ca3af; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
@@ -737,6 +859,39 @@ def dashboard():
   .method-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 700; }
   .method-get { background: #1e3a5f; color: #60a5fa; }
   .method-post { background: #14532d; color: #4ade80; }
+  .row-clickable { cursor: pointer; }
+  .row-clickable:hover { background: #1e2130 !important; }
+
+  /* History table */
+  .history-filters { display: flex; gap: 10px; align-items: center; padding: 12px 20px; border-bottom: 1px solid #2a2d3a; flex-wrap: wrap; }
+  .history-filters input, .history-filters select { background: #0f1117; border: 1px solid #2a2d3a; border-radius: 6px; color: #e0e0e0; padding: 5px 10px; font-size: 12px; outline: none; }
+  .history-filters input:focus, .history-filters select:focus { border-color: #2563eb; }
+  .history-filters input::placeholder { color: #4b5563; }
+  .btn-filter { background: #2563eb; color: #fff; border: none; padding: 5px 14px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .btn-filter:hover { background: #3b82f6; }
+  .pagination { display: flex; justify-content: center; align-items: center; gap: 6px; padding: 12px 20px; border-top: 1px solid #2a2d3a; }
+  .page-btn { background: #2a2d3a; color: #9ca3af; border: none; padding: 5px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+  .page-btn:hover { background: #3b4252; color: #fff; }
+  .page-btn.active { background: #2563eb; color: #fff; }
+  .page-btn:disabled { opacity: .3; cursor: not-allowed; }
+  .page-info { color: #6b7280; font-size: 12px; padding: 0 12px; }
+
+  /* Detail modal */
+  .detail-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 1000; justify-content: center; align-items: center; }
+  .detail-overlay.active { display: flex; }
+  .detail-modal { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 16px; max-width: 900px; width: 90%; max-height: 85vh; overflow-y: auto; }
+  .detail-header { padding: 16px 24px; border-bottom: 1px solid #2a2d3a; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; background: #1a1d27; z-index: 1; border-radius: 16px 16px 0 0; }
+  .detail-header h3 { font-size: 15px; color: #fff; }
+  .detail-close { background: none; border: none; color: #6b7280; font-size: 20px; cursor: pointer; padding: 4px 8px; border-radius: 6px; }
+  .detail-close:hover { background: #2a2d3a; color: #fff; }
+  .detail-body { padding: 20px 24px; }
+  .detail-meta { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+  .detail-meta-item { font-size: 12px; }
+  .detail-meta-item .label { color: #6b7280; }
+  .detail-meta-item .value { color: #e0e0e0; font-weight: 500; }
+  .detail-section { margin-bottom: 16px; }
+  .detail-section-title { font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+  .detail-code { background: #0f1117; border: 1px solid #2a2d3a; border-radius: 8px; padding: 12px 14px; font-family: 'Menlo','Consolas',monospace; font-size: 12px; color: #e0e0e0; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; line-height: 1.5; }
 
   /* Help modal */
   .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 1000; justify-content: center; align-items: center; }
@@ -777,9 +932,6 @@ def dashboard():
   .radio-pill + span { display: inline-block; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; border: 1px solid #2a2d3a; color: #6b7280; transition: all .15s; }
   .radio-pill:checked + span { background: #1e3a5f; border-color: #2563eb; color: #60a5fa; }
   .radio-green:checked + span { background: #14532d; border-color: #22c55e; color: #4ade80; }
-  .checkbox-pill { display: none; }
-  .checkbox-pill + span { display: inline-block; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; border: 1px solid #2a2d3a; color: #6b7280; transition: all .15s; cursor: pointer; }
-  .checkbox-pill:checked + span { background: #14532d; border-color: #22c55e; color: #4ade80; }
   .result-wrap { position: relative; }
   .result-area { width: 100%; min-height: 160px; max-height: 500px; background: #0f1117; border: 1px solid #2a2d3a; border-radius: 8px; padding: 12px 14px; color: #e0e0e0; font-family: 'Menlo','Consolas',monospace; font-size: 12px; line-height: 1.6; resize: vertical; outline: none; }
   .result-area:focus { border-color: #2563eb; }
@@ -798,6 +950,14 @@ def dashboard():
   <button class="btn-help" onclick="toggleModal(true)">💡 API Examples</button>
 </div>
 <p class="subtitle" id="updated">Loading...</p>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('dashboard', this)">📊 Dashboard</div>
+  <div class="tab" onclick="switchTab('history', this)">📜 History</div>
+</div>
+
+<!-- Tab: Dashboard -->
+<div class="tab-content active" id="tab-dashboard">
 
 <div class="grid">
   <div class="card">
@@ -853,12 +1013,12 @@ def dashboard():
 
 <div class="section">
   <div class="section-header">
-    <span>🔗 API Requests</span>
+    <span>🔗 Recent API Requests</span>
     <span style="font-size:11px;color:#6b7280" id="api-log-count"></span>
   </div>
   <div class="section-body" style="max-height:300px;overflow-y:auto" id="api-log-body">
     <table class="api-log-table">
-      <thead><tr><th>Time</th><th></th><th>Endpoint</th><th>Status</th><th>Duration</th><th>Detail</th></tr></thead>
+      <thead><tr><th>Time</th><th></th><th>Endpoint</th><th>Query</th><th>Status</th><th>Duration</th></tr></thead>
       <tbody id="api-log-tbody"></tbody>
     </table>
   </div>
@@ -878,6 +1038,58 @@ def dashboard():
     <span style="font-size:11px;color:#6b7280" id="modules-summary"></span>
   </div>
   <div class="section-body collapsed" id="modules-list" style="max-height:250px;overflow-y:auto"></div>
+</div>
+
+</div><!-- /tab-dashboard -->
+
+<!-- Tab: History -->
+<div class="tab-content" id="tab-history">
+  <div class="section">
+    <div class="section-header">
+      <span>📜 Request History (Persistent)</span>
+      <span style="font-size:11px;color:#6b7280" id="history-total"></span>
+    </div>
+    <div class="history-filters">
+      <input type="text" id="hf-search" placeholder="Search queries…" style="flex:1;min-width:160px" onkeydown="if(event.key==='Enter')loadHistory(1)">
+      <select id="hf-endpoint" style="width:140px">
+        <option value="">All endpoints</option>
+        <option value="/api/ask">/api/ask</option>
+        <option value="/api/query">/api/query</option>
+      </select>
+      <select id="hf-method" style="width:100px">
+        <option value="">Any method</option>
+        <option value="GET">GET</option>
+        <option value="POST">POST</option>
+      </select>
+      <select id="hf-status" style="width:110px">
+        <option value="">Any status</option>
+        <option value="200">200 OK</option>
+        <option value="500">500 Error</option>
+      </select>
+      <button class="btn-filter" onclick="loadHistory(1)">Search</button>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="api-log-table">
+        <thead><tr>
+          <th>ID</th><th>Time</th><th></th><th>Endpoint</th><th>Query</th>
+          <th>Status</th><th>Duration</th><th>Model</th><th>Sources</th>
+        </tr></thead>
+        <tbody id="history-tbody"></tbody>
+      </table>
+    </div>
+    <div class="pagination" id="history-pagination"></div>
+  </div>
+</div><!-- /tab-history -->
+
+<!-- Detail Modal -->
+<div class="detail-overlay" id="detail-modal" onclick="if(event.target===this)closeDetail()">
+  <div class="detail-modal">
+    <div class="detail-header">
+      <h3 id="detail-title">Request Detail</h3>
+      <button class="detail-close" onclick="closeDetail()">✕</button>
+    </div>
+    <div class="detail-body" id="detail-body">Loading...</div>
+  </div>
 </div>
 
 <!-- Help Modal -->
@@ -903,76 +1115,37 @@ def dashboard():
           <tr><td>top_k</td><td>int, default 10 — Number of chunks to retrieve</td></tr>
           <tr><td>filter</td><td>object, optional — Metadata filter, e.g. {"module": "mbp"}</td></tr>
           <tr><td>model</td><td>string, optional — Override LLM model name</td></tr>
-          <tr><td>format</td><td>string, optional — &quot;md&quot; for template Markdown, &quot;human&quot; for LLM-rewritten Markdown</td></tr>
+          <tr><td>format</td><td>string, optional — "md" or "human" for Markdown</td></tr>
         </table>
-        <p class="response-hint">Returns JSON: { query, answer, model, total_sources, sources[] } — or Markdown when format=md/human</p>
       </div>
 
       <div class="api-section">
-        <h3>GET /api/ask — Quick RAG via URL params</h3>
-        <p>Same as POST but via GET — handy for quick browser tests. Add <code>&amp;format=md</code> for readable Markdown.</p>
-        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl 'http://localhost:8090/api/ask?q=how+does+booking+work&top_k=8&format=md'</div>
-      </div>
-
-      <div class="api-section">
-        <h3>POST /api/query — Semantic Search (chunks only, no LLM)</h3>
-        <p>Returns raw matching chunks with distance scores. Useful when you need source documents without an LLM summary.</p>
-        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl -X POST http://localhost:8090/api/query \\
-  -H 'Content-Type: application/json' \\
-  -d '{
-    "query": "ReservationNightlyRateRequest",
-    "top_k": 5,
-    "filter": {"module": "mbp"}
-  }'</div>
+        <h3>GET /api/history — Paginated Request History</h3>
+        <p>Browse all past API requests stored in SQLite. Filter by endpoint, method, status, or search queries.</p>
+        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl 'http://localhost:8090/api/history?page=1&per_page=10&endpoint=/api/ask'</div>
         <table class="param-table">
-          <tr><td>query</td><td>string — Search query text</td></tr>
-          <tr><td>top_k</td><td>int, default 5 — Number of results</td></tr>
-          <tr><td>filter</td><td>object, optional — Metadata filter, e.g. {&quot;module&quot;: &quot;mbp&quot;}</td></tr>
-          <tr><td>format</td><td>string, optional — &quot;md&quot; for template Markdown, &quot;human&quot; for LLM-synthesized Markdown</td></tr>
+          <tr><td>page</td><td>int, default 1 — Page number</td></tr>
+          <tr><td>per_page</td><td>int, default 20 — Items per page (max 100)</td></tr>
+          <tr><td>endpoint</td><td>string, optional — Filter by endpoint path</td></tr>
+          <tr><td>q</td><td>string, optional — Search in query text</td></tr>
+          <tr><td>method</td><td>string, optional — Filter by HTTP method</td></tr>
+          <tr><td>status</td><td>int, optional — Filter by status code</td></tr>
         </table>
-        <p class="response-hint">Returns JSON: { query, total_results, results[] } — or Markdown when format=md/human</p>
       </div>
 
       <div class="api-section">
-        <h3>GET /api/query — Quick search via URL params</h3>
-        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl 'http://localhost:8090/api/query?q=InquiryReservation&top_k=3&format=md'</div>
+        <h3>GET /api/history/{id} — Full Request/Response Detail</h3>
+        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl http://localhost:8090/api/history/42</div>
       </div>
 
       <div class="api-section">
-        <h3>GET /api/status — Pipeline Status</h3>
-        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl http://localhost:8090/api/status</div>
-      </div>
-
-      <div class="api-section">
-        <h3>GET /api/status-rag — RAG Index Stats</h3>
-        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl http://localhost:8090/api/status-rag</div>
-      </div>
-
-      <div class="api-section">
-        <h3>GET /api/logs — Recent API Request Log</h3>
-        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl http://localhost:8090/api/logs</div>
+        <h3>GET /api/stats — API Usage Stats</h3>
+        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl http://localhost:8090/api/stats</div>
       </div>
 
       <div class="api-section" style="margin-bottom:0">
-        <h3>Python Example</h3>
-        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>import requests
-
-# JSON response
-resp = requests.post("http://localhost:8090/api/ask", json={
-    "query": "How does the pricing engine calculate nightly rates?",
-    "top_k": 10
-})
-data = resp.json()
-print(data["answer"])        # Markdown answer
-print(data["total_sources"])  # Number of source chunks used
-
-# Human-readable Markdown response
-resp = requests.post("http://localhost:8090/api/ask", json={
-    "query": "How does the pricing engine calculate nightly rates?",
-    "top_k": 10,
-    "format": "md"
-})
-print(resp.text)  # Full Markdown document with answer + sources</div>
+        <h3>GET /api/logs — Recent Request Log</h3>
+        <div class="code-block"><button class="btn-copy" onclick="copyCode(this)">Copy</button>curl http://localhost:8090/api/logs</div>
       </div>
 
     </div>
@@ -980,11 +1153,13 @@ print(resp.text)  # Full Markdown document with answer + sources</div>
 </div>
 
 <script>
-function toggleModule(header) {
-  const content = header.nextElementSibling;
-  const chevron = header.querySelector('.module-chevron');
-  content.classList.toggle('expanded');
-  chevron.classList.toggle('expanded');
+// ── Tab switching ───────────────────────────────────────────────
+function switchTab(tab, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.getElementById('tab-' + tab).classList.add('active');
+  if (el) el.classList.add('active');
+  if (tab === 'history') loadHistory(1);
 }
 
 function toggleModal(show) {
@@ -992,7 +1167,6 @@ function toggleModal(show) {
 }
 
 function _copyText(text, btn, okLabel, origLabel) {
-  // Fallback that works in non-HTTPS (IP address) contexts
   try { navigator.clipboard.writeText(text).then(() => { btn.textContent = okLabel; setTimeout(() => btn.textContent = origLabel, 1500); }); }
   catch(e) { const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); btn.textContent = okLabel; setTimeout(() => btn.textContent = origLabel, 1500); }
 }
@@ -1000,8 +1174,7 @@ function _copyText(text, btn, okLabel, origLabel) {
 function copyCode(btn) {
   const clone = btn.parentElement.cloneNode(true);
   clone.querySelector('.btn-copy')?.remove();
-  const code = clone.textContent.trim();
-  _copyText(code, btn, '✓', 'Copy');
+  _copyText(clone.textContent.trim(), btn, '✓', 'Copy');
 }
 
 function pipelineLogClass(line) {
@@ -1011,23 +1184,15 @@ function pipelineLogClass(line) {
   return '';
 }
 
-function statusClass(code) {
-  if (code >= 200 && code < 300) return 'status-ok';
-  return 'status-err';
-}
+function statusClass(code) { return (code >= 200 && code < 300) ? 'status-ok' : 'status-err'; }
+function methodClass(m) { return 'method-' + m.toLowerCase(); }
+function formatDuration(ms) { if (!ms) return '—'; return ms < 1000 ? ms.toFixed(0) + 'ms' : (ms / 1000).toFixed(1) + 's'; }
+function formatTime(iso) { if (!iso) return '—'; try { return new Date(iso).toLocaleString(); } catch(e) { return iso; } }
+function esc(s) { if (!s) return ''; return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-function methodClass(m) {
-  return 'method-' + m.toLowerCase();
-}
-
-function formatDuration(ms) {
-  if (ms < 1000) return ms.toFixed(0) + 'ms';
-  return (ms / 1000).toFixed(1) + 's';
-}
-
+// ── Dashboard refresh ───────────────────────────────────────────
 async function refresh() {
   try {
-    // Fetch status and API logs in parallel
     const [statusResp, apiLogResp] = await Promise.all([
       fetch('/api/status'),
       fetch('/api/logs')
@@ -1035,7 +1200,6 @@ async function refresh() {
     const d = await statusResp.json();
     const apiLogs = await apiLogResp.json();
 
-    // Header cards
     const running = d.running;
     document.getElementById('pipeline-status').innerHTML =
       `<span class="status-dot ${running ? 'dot-green' : 'dot-red'}"></span>${running ? 'Running' : 'Stopped'}`;
@@ -1045,24 +1209,19 @@ async function refresh() {
     document.getElementById('modules-done').textContent = d.done_modules + '/' + d.total_modules;
     document.getElementById('updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
 
-    // RAG status
     try {
       const rr = await fetch('/api/status-rag');
       const rd = await rr.json();
       document.getElementById('rag-chunks').textContent = rd.error ? 'Error' : (rd.indexed_chunks || 0).toLocaleString();
-    } catch(e2) {
-      document.getElementById('rag-chunks').textContent = '—';
-    }
+    } catch(e2) { document.getElementById('rag-chunks').textContent = '—'; }
 
-    // Modules (compact)
+    // Modules
     const list = document.getElementById('modules-list');
     const doneCount = d.modules.filter(m => m.status === 'done').length;
     document.getElementById('modules-summary').textContent = `${doneCount}/${d.modules.length} done`;
     list.innerHTML = d.modules.map(m => {
       const pct = m.total ? Math.round(m.completed / m.total * 100) : 0;
-      const color = m.status === 'done' ? '#4ade80' :
-                    m.status === 'generating' ? '#60a5fa' :
-                    m.status === 'failed' ? '#f87171' : '#374151';
+      const color = m.status === 'done' ? '#4ade80' : m.status === 'generating' ? '#60a5fa' : m.status === 'failed' ? '#f87171' : '#374151';
       const current = m.current_page ? ` → ${m.current_page}` : '';
       return `<div class="module-row">
         <span class="module-name">${m.name}${current}</span>
@@ -1073,18 +1232,18 @@ async function refresh() {
       </div>`;
     }).join('');
 
-    // API Request Logs (newest first)
+    // Recent API Requests (clickable rows)
     const apiLogBody = document.getElementById('api-log-body');
     const wasAtBottomApi = apiLogBody.scrollHeight - apiLogBody.clientHeight <= apiLogBody.scrollTop + 10;
     document.getElementById('api-log-count').textContent = apiLogs.length + ' requests';
-    document.getElementById('api-log-tbody').innerHTML = apiLogs.reverse().map(l =>
-      `<tr>
-        <td style="color:#6b7280">${l.time}</td>
+    document.getElementById('api-log-tbody').innerHTML = apiLogs.map(l =>
+      `<tr class="row-clickable" onclick="showDetail(${l.id})">
+        <td style="color:#6b7280;white-space:nowrap">${formatTime(l.created_at)}</td>
         <td><span class="method-badge ${methodClass(l.method)}">${l.method}</span></td>
-        <td>${l.path}</td>
-        <td class="${statusClass(l.status)}">${l.status}</td>
+        <td>${l.endpoint}</td>
+        <td style="color:#9ca3af;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.query_text || l.error || '')}</td>
+        <td class="${statusClass(l.status_code)}">${l.status_code}</td>
         <td style="color:#6b7280">${formatDuration(l.duration_ms)}</td>
-        <td style="color:#9ca3af;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${l.detail || ''}</td>
       </tr>`
     ).join('');
     if (wasAtBottomApi) apiLogBody.scrollTop = apiLogBody.scrollHeight;
@@ -1092,15 +1251,113 @@ async function refresh() {
     // Pipeline Logs
     const logsEl = document.getElementById('logs-body');
     const wasAtBottom = logsEl.scrollHeight - logsEl.clientHeight <= logsEl.scrollTop + 10;
-    logsEl.innerHTML = d.logs.map(l =>
-      `<div class="log-line ${pipelineLogClass(l)}">${l}</div>`
-    ).join('');
+    logsEl.innerHTML = d.logs.map(l => `<div class="log-line ${pipelineLogClass(l)}">${l}</div>`).join('');
     if (wasAtBottom) logsEl.scrollTop = logsEl.scrollHeight;
     document.getElementById('log-updated').textContent = new Date().toLocaleTimeString();
-
   } catch(e) { console.error(e); }
 }
 
+// ── History tab ─────────────────────────────────────────────────
+async function loadHistory(page) {
+  const search = document.getElementById('hf-search').value.trim();
+  const endpoint = document.getElementById('hf-endpoint').value;
+  const method = document.getElementById('hf-method').value;
+  const status = document.getElementById('hf-status').value;
+
+  const params = new URLSearchParams({page, per_page: 15});
+  if (search) params.set('q', search);
+  if (endpoint) params.set('endpoint', endpoint);
+  if (method) params.set('method', method);
+  if (status) params.set('status', status);
+
+  try {
+    const resp = await fetch('/api/history?' + params);
+    const data = await resp.json();
+
+    document.getElementById('history-total').textContent = `${data.total} total`;
+
+    document.getElementById('history-tbody').innerHTML = data.items.map(r =>
+      `<tr class="row-clickable" onclick="showDetail(${r.id})">
+        <td style="color:#6b7280">${r.id}</td>
+        <td style="color:#6b7280;white-space:nowrap">${formatTime(r.created_at)}</td>
+        <td><span class="method-badge ${methodClass(r.method)}">${r.method}</span></td>
+        <td>${r.endpoint}</td>
+        <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.query_text)}</td>
+        <td class="${statusClass(r.status_code)}">${r.status_code}</td>
+        <td style="color:#6b7280;white-space:nowrap">${formatDuration(r.duration_ms)}</td>
+        <td style="color:#60a5fa;font-size:11px">${r.model_used || '—'}</td>
+        <td style="color:#6b7280">${r.sources_count || '—'}</td>
+      </tr>`
+    ).join('');
+
+    // Pagination
+    const totalPages = data.total_pages;
+    let pagHtml = `<button class="page-btn" ${page <= 1 ? 'disabled' : ''} onclick="loadHistory(${page - 1})">← Prev</button>`;
+    const startP = Math.max(1, page - 3);
+    const endP = Math.min(totalPages, page + 3);
+    for (let p = startP; p <= endP; p++) {
+      pagHtml += `<button class="page-btn ${p === page ? 'active' : ''}" onclick="loadHistory(${p})">${p}</button>`;
+    }
+    pagHtml += `<button class="page-btn" ${page >= totalPages ? 'disabled' : ''} onclick="loadHistory(${page + 1})">Next →</button>`;
+    pagHtml += `<span class="page-info">Page ${page} of ${totalPages}</span>`;
+    document.getElementById('history-pagination').innerHTML = pagHtml;
+  } catch(e) { console.error('History load error:', e); }
+}
+
+// ── Detail modal ────────────────────────────────────────────────
+async function showDetail(id) {
+  document.getElementById('detail-modal').classList.add('active');
+  document.getElementById('detail-body').innerHTML = '<div style="padding:40px;text-align:center;color:#6b7280">Loading…</div>';
+
+  try {
+    const resp = await fetch('/api/history/' + id);
+    const d = await resp.json();
+
+    document.getElementById('detail-title').textContent = `${d.method} ${d.endpoint} — #${d.id}`;
+
+    let html = `<div class="detail-meta">
+      <div class="detail-meta-item"><div class="label">Time</div><div class="value">${formatTime(d.created_at)}</div></div>
+      <div class="detail-meta-item"><div class="label">Status</div><div class="value ${statusClass(d.status_code)}">${d.status_code}</div></div>
+      <div class="detail-meta-item"><div class="label">Duration</div><div class="value">${formatDuration(d.duration_ms)}</div></div>
+      <div class="detail-meta-item"><div class="label">Model</div><div class="value">${d.model_used || '—'}</div></div>
+      <div class="detail-meta-item"><div class="label">Sources</div><div class="value">${d.sources_count}</div></div>
+      <div class="detail-meta-item"><div class="label">Format</div><div class="value">${d.response_format || 'json'}</div></div>
+    </div>`;
+
+    if (d.query_text) {
+      html += `<div class="detail-section"><div class="detail-section-title">Query</div><div class="detail-code">${esc(d.query_text)}</div></div>`;
+    }
+
+    if (d.request_params && Object.keys(d.request_params).length > 0) {
+      html += `<div class="detail-section"><div class="detail-section-title">Request Parameters</div><div class="detail-code">${esc(JSON.stringify(d.request_params, null, 2))}</div></div>`;
+    }
+
+    if (d.error) {
+      html += `<div class="detail-section"><div class="detail-section-title" style="color:#f87171">Error</div><div class="detail-code" style="border-color:#450a0a">${esc(d.error)}</div></div>`;
+    }
+
+    if (d.response_body) {
+      let displayBody = d.response_body;
+      let label = d.response_format ? '(' + d.response_format + ')' : '';
+      try { const p = JSON.parse(d.response_body); displayBody = JSON.stringify(p, null, 2); label = '(JSON)'; } catch(e) {}
+      html += `<div class="detail-section"><div class="detail-section-title">Response Body ${label}</div><div class="detail-code" style="max-height:500px">${esc(displayBody)}</div></div>`;
+    }
+
+    document.getElementById('detail-body').innerHTML = html;
+  } catch(e) {
+    document.getElementById('detail-body').innerHTML = `<div style="padding:20px;color:#f87171">Error: ${e.message}</div>`;
+  }
+}
+
+function closeDetail() {
+  document.getElementById('detail-modal').classList.remove('active');
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { closeDetail(); toggleModal(false); }
+});
+
+// ── Query form ──────────────────────────────────────────────────
 async function sendQuery() {
   const input = document.getElementById('q-input');
   const btn = document.getElementById('btn-send');
@@ -1120,20 +1377,11 @@ async function sendQuery() {
 
   const t0 = performance.now();
   try {
-    let resp;
-    if (endpoint === 'ask') {
-      resp = await fetch('/api/ask', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, top_k: topK, format: fmt })
-      });
-    } else {
-      resp = await fetch('/api/query', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, top_k: topK, format: fmt })
-      });
-    }
+    const resp = await fetch('/api/' + endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, top_k: topK, format: fmt })
+    });
     const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
 
     if (!resp.ok) {
@@ -1146,20 +1394,16 @@ async function sendQuery() {
     if (ct.includes('text/') || fmt) {
       const text = await resp.text();
       resultEl.value = text;
-      const fmtLabel = fmt === 'human' ? 'Human-readable' : 'Markdown';
-      metaEl.textContent = `${endpoint.toUpperCase()} · ${elapsed}s · ${fmtLabel} response`;
+      metaEl.textContent = `${endpoint.toUpperCase()} · ${elapsed}s · ${fmt === 'human' ? 'Human-readable' : 'Markdown'}`;
     } else {
       const data = await resp.json();
       resultEl.value = JSON.stringify(data, null, 2);
-      const info = endpoint === 'ask'
-        ? `model: ${data.model} · sources: ${data.total_sources}`
-        : `results: ${data.total_results}`;
+      const info = endpoint === 'ask' ? `model: ${data.model} · sources: ${data.total_sources}` : `results: ${data.total_results}`;
       metaEl.textContent = `${endpoint.toUpperCase()} · ${elapsed}s · ${info}`;
     }
   } catch(e) {
-    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
     resultEl.value = 'Request failed: ' + e.message;
-    metaEl.textContent = `Failed in ${elapsed}s`;
+    metaEl.textContent = `Failed in ${((performance.now() - t0) / 1000).toFixed(2)}s`;
   } finally {
     btn.disabled = false;
     btn.innerHTML = 'Send';
