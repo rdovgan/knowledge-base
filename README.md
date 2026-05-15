@@ -18,8 +18,8 @@ Java Source Code (sources/)
 │  1. Parse    → java_parser.py               │
 │  2. Group    → domain_grouper.py            │
 │  3. Markdown → markdown_writer.py           │
-│  4. Enrich   → enricher.py   (LLM)         │
-│  4.5 Flows   → flow_generator.py (LLM)     │
+│  4. Enrich   → enricher.py   (LLM)          │
+│  4.5 Flows   → flow_generator.py (LLM)      │
 │  5. Index    → indexer.py    (ChromaDB)     │
 │                                             │
 │  state → data/parsed/, data/domains/        │
@@ -33,7 +33,7 @@ Java Source Code (sources/)
 │                                             │
 │  GET  /              — Web UI               │
 │  POST /api/query     — Semantic search      │
-│  POST /api/ask       — RAG: search + LLM   │
+│  POST /api/ask       — RAG: search + LLM    │
 │  GET  /api/status    — Pipeline status      │
 │  GET  /api/history   — Request history      │
 │  GET  /api/stats     — Usage stats          │
@@ -58,7 +58,7 @@ cakb/
 ├── db.py                       # SQLite — API request history
 ├── generate_entity_table_map.py # Utility: Java entity → DB table mapping
 │
-├── run_rag.py                  # ⭐ Main RAG pipeline runner
+├── run_rag.py                  # Main RAG pipeline runner
 ├── rag_pipeline/               # RAG pipeline modules
 │   ├── java_parser.py          #   Parse Java code (classes, methods, annotations)
 │   ├── domain_grouper.py       #   Group classes by domain
