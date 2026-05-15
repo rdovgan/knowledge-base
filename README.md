@@ -308,6 +308,7 @@ For regular index updates:
 | `data/api_history.db` | SQLite with API request history | ❌ ignored |
 | `data/entity_table_map.json` | Entity→Table mapping | ❌ ignored |
 | `rag/` | Generated wiki (markdown) | ✅ git submodule |
+| `rag/_flows/` | End-to-end business flow documents (27 flows) | ✅ git submodule |
 | `logs/` | Pipeline and API logs | ❌ ignored |
 
 ---
