@@ -12,6 +12,7 @@ node_modules/
 # Environment variables
 .env
 .rag_pipeline.lock
+pipeline_state.json
 
 # Editor directories and files
 .idea
@@ -38,6 +39,10 @@ logs/
 
 # RAG data (outside submodule, git-safe)
 data/
+
+# Dev tooling
+.taskmaster/
+.claude/
 
 # Task files
 # tasks.json
