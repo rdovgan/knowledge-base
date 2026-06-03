@@ -959,29 +959,6 @@ def dashboard():
 <!-- Tab: Dashboard -->
 <div class="tab-content active" id="tab-dashboard">
 
-<div class="grid">
-  <div class="card">
-    <div class="card-label">Pipeline</div>
-    <div class="card-value" id="pipeline-status">—</div>
-  </div>
-  <div class="card">
-    <div class="card-label">Progress</div>
-    <div class="card-value blue" id="progress">—</div>
-  </div>
-  <div class="card">
-    <div class="card-label">Pages Done</div>
-    <div class="card-value green" id="pages-done">—</div>
-  </div>
-  <div class="card">
-    <div class="card-label">Modules Done</div>
-    <div class="card-value" id="modules-done">—</div>
-  </div>
-  <div class="card">
-    <div class="card-label">Index Chunks</div>
-    <div class="card-value blue" id="rag-chunks">—</div>
-  </div>
-</div>
-
 <div class="section">
   <div class="section-header">🔍 Query Knowledge Base</div>
   <div class="query-form">
@@ -1200,20 +1177,7 @@ async function refresh() {
     const d = await statusResp.json();
     const apiLogs = await apiLogResp.json();
 
-    const running = d.running;
-    document.getElementById('pipeline-status').innerHTML =
-      `<span class="status-dot ${running ? 'dot-green' : 'dot-red'}"></span>${running ? 'Running' : 'Stopped'}`;
-    document.getElementById('pipeline-status').className = 'card-value ' + (running ? 'green' : 'red');
-    document.getElementById('progress').textContent = d.progress_pct + '%';
-    document.getElementById('pages-done').textContent = d.done_pages + '/' + d.total_pages;
-    document.getElementById('modules-done').textContent = d.done_modules + '/' + d.total_modules;
     document.getElementById('updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
-
-    try {
-      const rr = await fetch('/api/status-rag');
-      const rd = await rr.json();
-      document.getElementById('rag-chunks').textContent = rd.error ? 'Error' : (rd.indexed_chunks || 0).toLocaleString();
-    } catch(e2) { document.getElementById('rag-chunks').textContent = '—'; }
 
     // Modules
     const list = document.getElementById('modules-list');

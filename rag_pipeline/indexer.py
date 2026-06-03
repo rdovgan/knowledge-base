@@ -104,15 +104,18 @@ def _get_indexed_files(collection) -> set:
     """Extract set of source_file values already in the collection."""
     indexed = set()
     try:
-        # ChromaDB get() with include=["metadatas"] to scan source_file values
         batch_size = 5000
         total = collection.count()
         offset = 0
         while offset < total:
+            # Use offset-based pagination instead of sequential IDs
             result = collection.get(
-                ids=[f"chunk_{i}" for i in range(offset, min(offset + batch_size, total))],
+                limit=batch_size,
+                offset=offset,
                 include=["metadatas"],
             )
+            if not result.get('ids'):
+                break
             for meta in result.get('metadatas', []):
                 sf = meta.get('source_file', '') if meta else ''
                 if sf:
@@ -211,9 +214,12 @@ def build_vectorstore(
             total_existing = collection.count()
             for offset in range(0, total_existing, batch_size_del):
                 result = collection.get(
-                    ids=[f"chunk_{i}" for i in range(offset, min(offset + batch_size_del, total_existing))],
+                    limit=batch_size_del,
+                    offset=offset,
                     include=["metadatas"],
                 )
+                if not result.get('ids'):
+                    break
                 for i, meta in enumerate(result.get('metadatas', [])):
                     if meta and meta.get('source_file', '') in stale_files:
                         stale_ids.append(result['ids'][i])
