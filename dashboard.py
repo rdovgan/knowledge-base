@@ -28,7 +28,7 @@ import uvicorn
 import subprocess
 import db as db_module
 
-app = FastAPI(title="CAKB — RAG Pipeline & Query API")
+app = FastAPI(title="BookingPal — RAG Knowledge Base")
 
 log = logging.getLogger("cakb.api")
 
@@ -794,7 +794,7 @@ def dashboard():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CAKB — RAG Pipeline & Query API</title>
+<title>BookingPal — RAG Knowledge Base</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; padding: 24px; max-width: 1200px; margin: 0 auto; }
@@ -946,7 +946,7 @@ def dashboard():
 <body>
 
 <div class="header-row">
-  <h1>🚀 CAKB — RAG Pipeline</h1>
+  <h1>🚀 BookingPal — RAG Knowledge Base</h1>
   <button class="btn-help" onclick="toggleModal(true)">💡 API Examples</button>
 </div>
 <p class="subtitle" id="updated">Loading...</p>
