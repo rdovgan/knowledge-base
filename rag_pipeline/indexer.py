@@ -14,8 +14,15 @@ from datetime import datetime
 log = logging.getLogger(__name__)
 
 
-def chunk_markdown(content: str, file_path: str, max_chunk_size: int = 1500) -> List[Dict]:
-    """Split Markdown content into chunks by headers."""
+def chunk_markdown(content: str, file_path: str, max_chunk_size: int = 2000) -> List[Dict]:
+    """Split Markdown content into chunks by headers.
+    
+    For endpoint pages (_endpoints/), uses larger chunks to keep
+    the endpoint table and routing info together.
+    """
+    # Use larger chunks for endpoint pages to keep routing tables intact
+    if '/_endpoints/' in file_path:
+        max_chunk_size = 4000
     metadata = {}
     body = content
     if content.startswith('---'):
@@ -74,9 +81,19 @@ def chunk_markdown(content: str, file_path: str, max_chunk_size: int = 1500) -> 
                 chunks.append({'text': buffer.strip(), 'header': section['header'], 'metadata': {**metadata}})
 
     # Filter tiny chunks
+    # Inject source file title into every chunk for better context
+    page_title = ''
+    for section in sections:
+        if section['header']:
+            page_title = section['header']
+            break
+    
     chunks = [c for c in chunks if len(c['text'].strip()) > 50]
 
     for chunk in chunks:
+        # Prepend page title to chunk text for context when chunk doesn't start with header
+        if page_title and not chunk['text'].lstrip().startswith('#'):
+            chunk['text'] = f"({page_title})\n" + chunk['text']
         chunk['metadata']['source_file'] = file_path
         chunk['metadata']['indexed_at'] = datetime.now().isoformat()
 
@@ -171,12 +188,40 @@ def build_vectorstore(
                     md_files.append(os.path.join(root, f))
         log.info(f"Found {len(md_files)} Markdown files")
 
-    # ── Incremental: find what's already indexed ────────────────
-    if incremental and not only_files:
+    # ── Clean up stale chunks & find new files ──────────────
+    if incremental:
+        all_wiki_files = set()
+        for root, dirs, files in os.walk(wiki_dir):
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for f in files:
+                if f.endswith('.md'):
+                    rel = os.path.join(root, f).replace(wiki_dir, '').lstrip('/')
+                    all_wiki_files.add(rel)
+        
         log.info("Scanning existing index for incremental update...")
         indexed_files = _get_indexed_files(collection)
         log.info(f"Found {len(indexed_files)} unique files already indexed")
-
+        
+        # Remove chunks for files that no longer exist on disk
+        stale_files = indexed_files - all_wiki_files
+        if stale_files:
+            log.info(f"Found {len(stale_files)} stale files to remove from index")
+            stale_ids = []
+            batch_size_del = 5000
+            total_existing = collection.count()
+            for offset in range(0, total_existing, batch_size_del):
+                result = collection.get(
+                    ids=[f"chunk_{i}" for i in range(offset, min(offset + batch_size_del, total_existing))],
+                    include=["metadatas"],
+                )
+                for i, meta in enumerate(result.get('metadatas', [])):
+                    if meta and meta.get('source_file', '') in stale_files:
+                        stale_ids.append(result['ids'][i])
+            if stale_ids:
+                for i in range(0, len(stale_ids), 1000):
+                    collection.delete(ids=stale_ids[i:i+1000])
+                log.info(f"Removed {len(stale_ids)} stale chunks from {len(stale_files)} deleted files")
+        
         # Filter to only new/changed files
         new_files = []
         for fp in md_files:
@@ -188,7 +233,7 @@ def build_vectorstore(
 
         if not md_files:
             log.info("✅ Nothing new to index")
-            return {"collection": collection_name, "total_chunks": existing_count, "indexed_now": 0}
+            return {"collection": collection_name, "total_chunks": collection.count(), "indexed_now": 0}
     elif only_files:
         # For specific files, always index them (upsert)
         pass
