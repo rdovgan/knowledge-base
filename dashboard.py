@@ -785,7 +785,10 @@ def api_reset():
     return {"status": "reset"}
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/favicon.svg", response_class=Response)
+def favicon():
+    svg = (Path(__file__).parent / "assets" / "favicon.svg").read_text(encoding="utf-8")
+    return Response(content=svg, media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -794,6 +797,7 @@ def dashboard():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <title>BookingPal — RAG Knowledge Base</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -946,7 +950,8 @@ def dashboard():
 <body>
 
 <div class="header-row">
-  <h1>🚀 BookingPal — RAG Knowledge Base</h1>
+  <img src="/favicon.svg" alt="" style="width:34px;height:34px;flex:0 0 auto">
+  <h1>BookingPal — RAG Knowledge Base</h1>
   <button class="btn-help" onclick="toggleModal(true)">💡 API Examples</button>
 </div>
 <p class="subtitle" id="updated">Loading...</p>

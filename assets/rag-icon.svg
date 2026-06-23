@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="RAG Knowledge Base">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1e2740"/>
+      <stop offset="1" stop-color="#10131c"/>
+    </linearGradient>
+    <linearGradient id="pageL" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#bfdbfe"/>
+      <stop offset="1" stop-color="#3b82f6"/>
+    </linearGradient>
+    <linearGradient id="pageR" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#93c5fd"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="soft" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="1.2"/>
+    </filter>
+  </defs>
+
+  <!-- background squircle -->
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#bg)"/>
+  <rect x="2.5" y="2.5" width="59" height="59" rx="15.5" fill="none" stroke="#2f3a55" stroke-width="1"/>
+
+  <!-- open book -->
+  <g filter="url(#glow)">
+    <path d="M32 24 C27.5 21.5 22.5 20.6 17 21.2 L17 42 C22.5 41.4 27.5 42.3 32 45 Z" fill="url(#pageL)"/>
+    <path d="M32 24 C36.5 21.5 41.5 20.6 47 21.2 L47 42 C41.5 41.4 36.5 42.3 32 45 Z" fill="url(#pageR)"/>
+  </g>
+
+  <!-- text lines (knowledge) -->
+  <g stroke="#0f1117" stroke-width="1.6" stroke-linecap="round" opacity="0.55">
+    <line x1="21.5" y1="27.5" x2="29" y2="26.7"/>
+    <line x1="21.5" y1="31.5" x2="29" y2="30.7"/>
+    <line x1="22" y1="35.5" x2="28" y2="34.8"/>
+    <line x1="35" y1="26.7" x2="42.5" y2="27.5"/>
+    <line x1="35" y1="30.7" x2="42.5" y2="31.5"/>
+    <line x1="36" y1="34.8" x2="42" y2="35.5"/>
+  </g>
+
+  <!-- AI sparkle (retrieval + generation) -->
+  <path d="M48 11 C48.7 14 49.6 14.9 52.5 15.5 C49.6 16.1 48.7 17 48 20 C47.3 17 46.4 16.1 43.5 15.5 C46.4 14.9 47.3 14 48 11 Z" fill="#e0f2fe" filter="url(#glow)"/>
+  <circle cx="19" cy="14" r="1.4" fill="#93c5fd" opacity="0.85"/>
+  <circle cx="38" cy="8" r="1" fill="#93c5fd" opacity="0.6"/>
+</svg>
