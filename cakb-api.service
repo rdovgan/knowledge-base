@@ -4,23 +4,24 @@ After=network.target
 
 [Service]
 Type=simple
-User=r.dovogan
-Group=backend
-WorkingDirectory=/home/r.dovgan/cakb
-ExecStart=/usr/bin/python3 /home/r.dovgan/cakb/dashboard.py
+User=root
+Group=root
+WorkingDirectory=/opt/knowledge-base
+ExecStart=/opt/knowledge-base/venv/bin/python3 /opt/knowledge-base/dashboard.py
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:/home/r.dovgan/cakb/logs/dashboard.log
-StandardError=append:/home/r.dovgan/cakb/logs/dashboard.log
+StandardOutput=append:/opt/knowledge-base/logs/dashboard.log
+StandardError=append:/opt/knowledge-base/logs/dashboard.log
 
 # Environment
-Environment=PATH=/usr/bin:/usr/local/bin:/home/r.dovgan/cakb/venv/bin
-EnvironmentFile=/home/r.dovgan/cakb/.env
+Environment=PATH=/usr/bin:/usr/local/bin:/opt/knowledge-base/venv/bin
+Environment=TMPDIR=/opt/knowledge-base/data/tmp
+EnvironmentFile=/opt/knowledge-base/.env
 
 # Security
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/home/r.dovgan/cakb/logs /home/r.dovgan/cakb/rag /home/r.dovgan/cakb/data /home/r.dovgan/cakb/.rag_pipeline.lock
+ReadWritePaths=/opt/knowledge-base/logs /opt/knowledge-base/rag /opt/knowledge-base/data /opt/knowledge-base/.rag_pipeline.lock
 
 [Install]
 WantedBy=multi-user.target

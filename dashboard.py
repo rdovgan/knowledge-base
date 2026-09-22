@@ -28,7 +28,7 @@ import uvicorn
 import subprocess
 import db as db_module
 
-app = FastAPI(title="BookingPal — RAG Knowledge Base")
+app = FastAPI(title="BookingPal — RAG Knowledge Base", root_path="/rag")
 
 log = logging.getLogger("cakb.api")
 
@@ -188,7 +188,9 @@ def api_history_detail(request_id: int):
         return JSONResponse({"error": "Not found"}, status_code=404)
     return detail
 
-PROJECT_ROOT = Path("/home/r.dovgan/cakb")
+# Resolve project root from this file's location so the dashboard works regardless
+# of where it is deployed (overridable via CAKB_ROOT env var).
+PROJECT_ROOT = Path(os.environ.get("CAKB_ROOT", Path(__file__).resolve().parent))
 RAG_DIR = PROJECT_ROOT / "rag"          # wiki markdown (submodule)
 DATA_DIR = PROJECT_ROOT / "data"        # pipeline data (outside submodule, git-safe)
 LOG_FILE = PROJECT_ROOT / "logs" / "pipeline.log"
@@ -416,7 +418,7 @@ def _multi_query_retrieve(query: str, top_k: int, filter_metadata: Optional[dict
 
         for sq in sub_queries:
             for r in query_rag(query=sq, store_dir=str(VECTORSTORE_DIR),
-                               collection_name="wiki_java", top_k=top_k // 2, filter_metadata=filter_metadata):
+                               collection_name="wiki_java", top_k=max(1, top_k // 2), filter_metadata=filter_metadata):
                 _add(r)
 
     # Sort: semantic results by distance, keyword results after
@@ -792,12 +794,12 @@ def favicon():
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
-    return """<!DOCTYPE html>
+    return r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <title>BookingPal — RAG Knowledge Base</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -950,7 +952,7 @@ def dashboard():
 <body>
 
 <div class="header-row">
-  <img src="/favicon.svg" alt="" style="width:34px;height:34px;flex:0 0 auto">
+  <img src="favicon.svg" alt="" style="width:34px;height:34px;flex:0 0 auto">
   <h1>BookingPal — RAG Knowledge Base</h1>
   <button class="btn-help" onclick="toggleModal(true)">💡 API Examples</button>
 </div>
@@ -1135,6 +1137,10 @@ def dashboard():
 </div>
 
 <script>
+// When mounted under a sub-path (e.g. nginx /rag/), resolve API URLs
+// relative to the page so requests reach this app, not the host root.
+const BASE = window.location.pathname.replace(/\/+$/, '');
+
 // ── Tab switching ───────────────────────────────────────────────
 function switchTab(tab, el) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -1176,8 +1182,8 @@ function esc(s) { if (!s) return ''; return s.replace(/&/g,'&amp;').replace(/</g
 async function refresh() {
   try {
     const [statusResp, apiLogResp] = await Promise.all([
-      fetch('/api/status'),
-      fetch('/api/logs')
+      fetch(BASE + '/api/status'),
+      fetch(BASE + '/api/logs')
     ]);
     const d = await statusResp.json();
     const apiLogs = await apiLogResp.json();
@@ -1240,7 +1246,7 @@ async function loadHistory(page) {
   if (status) params.set('status', status);
 
   try {
-    const resp = await fetch('/api/history?' + params);
+    const resp = await fetch(BASE + '/api/history?' + params);
     const data = await resp.json();
 
     document.getElementById('history-total').textContent = `${data.total} total`;
@@ -1279,7 +1285,7 @@ async function showDetail(id) {
   document.getElementById('detail-body').innerHTML = '<div style="padding:40px;text-align:center;color:#6b7280">Loading…</div>';
 
   try {
-    const resp = await fetch('/api/history/' + id);
+    const resp = await fetch(BASE + '/api/history/' + id);
     const d = await resp.json();
 
     document.getElementById('detail-title').textContent = `${d.method} ${d.endpoint} — #${d.id}`;
@@ -1346,7 +1352,7 @@ async function sendQuery() {
 
   const t0 = performance.now();
   try {
-    const resp = await fetch('/api/' + endpoint, {
+    const resp = await fetch(BASE + '/api/' + endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, top_k: topK, format: fmt })
@@ -1392,5 +1398,51 @@ setInterval(refresh, 5000);
 </html>"""
 
 
+def _patch_torch_cache_factory():
+    """Make torch's mega-cache CacheArtifactFactory.register idempotent.
+
+    torch 2.13 raises `AssertionError: Artifact of type=precompile already
+    registered in mega-cache artifact factory` when sentence_transformers ->
+    transformers -> torch._dynamo.package is (re)imported from a request worker
+    thread after the process has been serving. Turning the re-registration into
+    a no-op avoids the 500 without changing normal behaviour.
+    """
+    try:
+        from torch.compiler._cache import CacheArtifactFactory
+    except Exception as e:
+        log.warning(f"[startup] torch cache patch skipped: {e}")
+        return
+    if getattr(CacheArtifactFactory.register, "_cakb_idempotent", False):
+        return
+    _orig = CacheArtifactFactory.register
+
+    @classmethod
+    def _register_idempotent(cls, artifact_cls):  # type: ignore[override]
+        try:
+            return _orig.__func__(cls, artifact_cls)
+        except AssertionError:
+            # Already registered (same or equivalent class) — ignore.
+            return artifact_cls
+
+    _register_idempotent._cakb_idempotent = True  # type: ignore[attr-defined]
+    CacheArtifactFactory.register = _register_idempotent
+
+
+def _warmup_imports():
+    """Import heavy ML modules once in the main thread at startup.
+
+    This populates sys.modules so the later lazy imports that run inside
+    request worker threads just return the cached modules (no import race,
+    no torch double-registration).
+    """
+    try:
+        import sentence_transformers  # noqa: F401
+        log.info("[startup] sentence_transformers warm-import OK")
+    except Exception as e:
+        log.warning(f"[startup] sentence_transformers warm-import failed: {e}")
+
+
 if __name__ == "__main__":
+    _patch_torch_cache_factory()
+    _warmup_imports()
     uvicorn.run(app, host="0.0.0.0", port=8090)
