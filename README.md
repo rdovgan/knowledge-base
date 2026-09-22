@@ -135,6 +135,11 @@ LLM_BASE_URL=https://api.z.ai/api/coding/paas/v4
 LLM_MODEL=glm-5-turbo
 LLM_FALLBACK_MODEL=glm-4.7
 INDEX_MAX_RETRIES=3
+
+# Optional — Jev (TypeSafe AI) relevance rerank for /api/ask.
+# Falls back to unranked results if unset, disabled, or the call fails.
+JEV_RERANK_ENABLED=false
+TYPESAFE_API_KEY=your_typesafe_api_key_here
 ```
 
 ### 4. Prepare Source Code

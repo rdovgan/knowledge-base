@@ -322,6 +322,7 @@ _check_vectorstore()
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
 LLM_MODEL = os.environ.get("LLM_MODEL", "glm-5-turbo")
 LLM_FALLBACK = os.environ.get("LLM_FALLBACK_MODEL", "glm-4.7")
+JEV_RERANK_ENABLED = os.environ.get("JEV_RERANK_ENABLED", "false").lower() == "true"
 
 SYSTEM_PROMPT = """You are a senior Java/Spring Boot architect with deep knowledge of this codebase.
 Answer the user's question using ONLY the provided context from the knowledge base.
@@ -577,6 +578,11 @@ def _do_ask(query: str, top_k: int, filter_metadata: Optional[dict], model_overr
             model="none", total_sources=0, sources=[],
         )
 
+    # 2.5. Jev relevance rerank (optional — quality improvement, never a hard dependency)
+    if JEV_RERANK_ENABLED:
+        from rag_pipeline.reranker import rerank_chunks
+        all_results = rerank_chunks(query, all_results)
+
     # 3. Build context (top N results after dedup)
     max_context_results = min(len(all_results), top_k * 3)  # Allow more context
     context_parts = []
@@ -595,6 +601,7 @@ def _do_ask(query: str, top_k: int, filter_metadata: Optional[dict], model_overr
             "domain": domain,
             "module": module,
             "distance": round(r['distance'], 4),
+            **({"jev_relevance": round(r['jev_relevance'], 2)} if r.get('jev_relevance') is not None else {}),
         })
 
     context = '\n\n---\n\n'.join(context_parts)
