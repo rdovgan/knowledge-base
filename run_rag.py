@@ -135,10 +135,9 @@ class PipelineLock:
         if self._lock_file:
             fcntl.flock(self._lock_file, fcntl.LOCK_UN)
             self._lock_file.close()
-        try:
-            self.lock_path.unlink()
-        except:
-            pass
+        # NOTE: do NOT unlink the lock file. It is listed in
+        # cakb-api.service ReadWritePaths=; systemd fails namespace setup
+        # (exit 226) on restart if the file is missing.
 
 
 # ── Step 1: Parse ─────────────────────────────────────────────────

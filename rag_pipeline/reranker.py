@@ -25,6 +25,8 @@ JEV_STATE_TOKEN_BUDGET = 28000
 
 RELEVANCE_LEVELS = ["irrelevant", "tangential", "relevant", "highly_relevant"]
 DEFAULT_MIN_SCORE = 1.0  # drop anything at/below "tangential"
+# Batch scoring all retrieved chunks in one request can take well over 5s.
+DEFAULT_TIMEOUT = float(os.environ.get("JEV_RERANK_TIMEOUT", "20"))
 
 
 def _estimate_tokens(text: str) -> int:
@@ -73,7 +75,7 @@ def rerank_chunks(
     results: List[Dict],
     api_key: Optional[str] = None,
     min_score: float = DEFAULT_MIN_SCORE,
-    timeout: float = 5.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> List[Dict]:
     """
     Score `results` (dicts with at least a `text` key, as returned by
